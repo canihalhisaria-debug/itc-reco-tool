@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GSTR-2B vs Purchase Register Reconciliation</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+  <main class="container">
+    <header>
+      <h1>GSTR-2B vs Purchase Register Reconciliation</h1>
+      <p>Upload files, map columns, reconcile, and export results.</p>
+    </header>
+
+    <section class="card upload-section">
+      <h2>1) Upload Files</h2>
+      <div class="upload-grid">
+        <label class="field">
+          <span>GSTR-2B File (Excel/CSV)</span>
+          <input type="file" id="file2b" accept=".xlsx,.xls,.csv" />
+        </label>
+        <label class="field">
+          <span>Purchase Register File (Excel/CSV)</span>
+          <input type="file" id="fileBooks" accept=".xlsx,.xls,.csv" />
+        </label>
+      </div>
+      <div class="status-row">
+        <span id="status2b" class="status-pill">2B: Not loaded</span>
+        <span id="statusBooks" class="status-pill">Books: Not loaded</span>
+      </div>
+    </section>
+
+    <section class="card" id="mappingSection">
+      <h2>2) Column Mapping</h2>
+      <p class="muted">Map required columns for each file before reconciliation.</p>
+      <div class="mapping-grid">
+        <div>
+          <h3>GSTR-2B Mapping</h3>
+          <div id="map2b" class="mapping-list"></div>
+        </div>
+        <div>
+          <h3>Purchase Register Mapping</h3>
+          <div id="mapBooks" class="mapping-list"></div>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="reconcileBtn" disabled>Run Reconciliation</button>
+      </div>
+    </section>
+
+    <section class="summary-grid" id="summaryCards">
+      <article class="summary-card"><h4>Total Books Invoices</h4><p id="totalBooks">0</p></article>
+      <article class="summary-card"><h4>Total 2B Invoices</h4><p id="total2b">0</p></article>
+      <article class="summary-card"><h4>Matched Count</h4><p id="matchedCount">0</p></article>
+      <article class="summary-card"><h4>Missing in 2B Count</h4><p id="missing2bCount">0</p></article>
+      <article class="summary-card"><h4>Missing in Books Count</h4><p id="missingBooksCount">0</p></article>
+    </section>
+
+    <section class="card" id="resultsSection">
+      <h2>4) Results</h2>
+      <div class="tabs" id="tabButtons"></div>
+      <div class="tab-toolbar">
+        <button id="exportBtn" disabled>Export Current Tab CSV</button>
+      </div>
+      <div class="table-wrap">
+        <table id="resultTable"></table>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
