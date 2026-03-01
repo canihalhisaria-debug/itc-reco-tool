@@ -9,23 +9,17 @@ const REQUIRED_FIELDS = [
   "SGST",
 ];
 
-const MATCH_SETTINGS = {
+const DEFAULT_SETTINGS = {
   taxableTolerance: 50,
   taxTolerance: 10,
-};
-
-const MATCH_TYPES = {
-  MATCHED_AUTO: "MATCHED_AUTO",
-  MATCH_REVIEW: "MATCH_REVIEW",
-  NOT_IN_2B: "NOT_IN_2B",
-  NOT_IN_PR: "NOT_IN_PR",
+  requireSameMonth: true,
 };
 
 const REMARKS = {
-  [MATCH_TYPES.MATCHED_AUTO]: "Auto matched by GSTIN + Amount",
-  [MATCH_TYPES.MATCH_REVIEW]: "Review - amount close",
-  [MATCH_TYPES.NOT_IN_2B]: "Not reflecting in 2B",
-  [MATCH_TYPES.NOT_IN_PR]: "Not recorded in Purchase Register",
+  MATCHED: "Matched",
+  VALUE_DIFFERENCE: "Value Difference",
+  NOT_IN_2B: "Not in 2B",
+  NOT_IN_PR: "Not in PR",
 };
 
 const state = {
@@ -35,10 +29,14 @@ const state = {
   headersBooks: [],
   mapped2b: {},
   mappedBooks: {},
+  settings: { ...DEFAULT_SETTINGS },
   results: {
     Matched: [],
+    "Value Difference": [],
     "Not in 2B": [],
     "Not in PR": [],
+    PurchaseRegisterExport: [],
+    GSTR2BExport: [],
   },
   activeTab: "Matched",
 };
@@ -53,11 +51,22 @@ const reconcileBtn = document.getElementById("reconcileBtn");
 const tabButtons = document.getElementById("tabButtons");
 const resultTable = document.getElementById("resultTable");
 const exportBtn = document.getElementById("exportBtn");
+const taxableToleranceInput = document.getElementById("taxableTolerance");
+const taxToleranceInput = document.getElementById("taxTolerance");
+const requireSameMonthInput = document.getElementById("requireSameMonth");
 
 file2bInput.addEventListener("change", (e) => handleFile(e.target.files[0], "2b"));
 fileBooksInput.addEventListener("change", (e) => handleFile(e.target.files[0], "books"));
 reconcileBtn.addEventListener("click", reconcile);
-exportBtn.addEventListener("click", exportCurrentTab);
+exportBtn.addEventListener("click", exportResults);
+
+[taxableToleranceInput, taxToleranceInput].forEach((input) => {
+  input.addEventListener("change", syncSettingsFromUi);
+  input.addEventListener("input", syncSettingsFromUi);
+});
+requireSameMonthInput.addEventListener("change", syncSettingsFromUi);
+
+syncSettingsToUi();
 
 async function handleFile(file, type) {
   if (!file) return;
@@ -81,6 +90,7 @@ async function handleFile(file, type) {
     statusBooks.classList.add("ok");
     renderMapping("books");
   }
+
   updateReconcileButtonState();
 }
 
@@ -101,38 +111,57 @@ function renderMapping(type) {
     select.innerHTML = `<option value="">Select column...</option>${headers
       .map((h) => `<option value="${escapeHtml(h)}">${escapeHtml(h)}</option>`)
       .join("")}`;
+
     select.value = mapped[field] || "";
     select.addEventListener("change", () => {
       mapped[field] = select.value;
       updateReconcileButtonState();
     });
 
-    row.append(label, select);
+    row.appendChild(label);
+    row.appendChild(select);
     target.appendChild(row);
   });
 }
 
 function updateReconcileButtonState() {
-  const canRun =
+  const ready =
     state.raw2b.length > 0 &&
     state.rawBooks.length > 0 &&
     REQUIRED_FIELDS.every((f) => state.mapped2b[f]) &&
     REQUIRED_FIELDS.every((f) => state.mappedBooks[f]);
-  reconcileBtn.disabled = !canRun;
+
+  reconcileBtn.disabled = !ready;
 }
 
-function normalizeRow(row, mapping) {
+function syncSettingsToUi() {
+  taxableToleranceInput.value = String(state.settings.taxableTolerance);
+  taxToleranceInput.value = String(state.settings.taxTolerance);
+  requireSameMonthInput.checked = state.settings.requireSameMonth;
+}
+
+function syncSettingsFromUi() {
+  state.settings.taxableTolerance = toNumber(taxableToleranceInput.value);
+  state.settings.taxTolerance = toNumber(taxToleranceInput.value);
+  state.settings.requireSameMonth = Boolean(requireSameMonthInput.checked);
+}
+
+function normalizeRow(row, mapping, sourceIndex) {
   const normalized = {
+    original: { ...row },
+    sourceIndex,
     gstin: String(row[mapping["GSTIN"]] || "").trim().toUpperCase(),
-    supplierName: String(row[mapping["Supplier Name"]] || "").trim().toUpperCase(),
-    invoiceNo: String(row[mapping["Invoice No"]] || "").trim().toUpperCase(),
+    supplierName: String(row[mapping["Supplier Name"]] || "").trim(),
+    invoiceNo: String(row[mapping["Invoice No"]] || "").trim(),
     invoiceDate: normalizeDate(row[mapping["Invoice Date"]]),
     taxableValue: toNumber(row[mapping["Taxable Value"]]),
     igst: toNumber(row[mapping["IGST"]]),
     cgst: toNumber(row[mapping["CGST"]]),
     sgst: toNumber(row[mapping["SGST"]]),
+    used: false,
   };
-  normalized.totalTax = normalized.igst + normalized.cgst + normalized.sgst;
+
+  normalized.totalGST = normalized.igst + normalized.cgst + normalized.sgst;
   normalized.invoiceMonth = monthPart(normalized.invoiceDate);
   return normalized;
 }
@@ -141,45 +170,199 @@ function monthPart(date) {
   return date ? date.slice(0, 7) : "";
 }
 
-function isSameMonth(dateA, dateB) {
-  return Boolean(monthPart(dateA) && monthPart(dateA) === monthPart(dateB));
-}
-
-function isAmountMatch(bookRow, twoBRow) {
-  const taxableDiff = Math.abs(bookRow.taxableValue - twoBRow.taxableValue);
-  const taxDiff = Math.abs(bookRow.totalTax - twoBRow.totalTax);
+function diffSummary(prRow, twoBRow) {
+  const taxableDiff = Math.abs(prRow.taxableValue - twoBRow.taxableValue);
+  const gstDiff = Math.abs(prRow.totalGST - twoBRow.totalGST);
   return {
     taxableDiff,
-    taxDiff,
+    gstDiff,
     withinTolerance:
-      taxableDiff <= MATCH_SETTINGS.taxableTolerance && taxDiff <= MATCH_SETTINGS.taxTolerance,
+      taxableDiff <= state.settings.taxableTolerance && gstDiff <= state.settings.taxTolerance,
+    combinedDiff: taxableDiff + gstDiff,
   };
 }
 
-function findBestCandidate(bookRow, candidates) {
-  const sameMonthCandidates = candidates.filter(
-    (candidate) => !candidate.used && candidate.gstin === bookRow.gstin && isSameMonth(candidate.invoiceDate, bookRow.invoiceDate)
-  );
+function findCandidate(prRow, twoBRows) {
+  const sameGstinRows = twoBRows.filter((row) => !row.used && row.gstin === prRow.gstin);
+  if (!sameGstinRows.length) return null;
 
-  if (!sameMonthCandidates.length) {
-    return { candidate: null, taxableDiff: 0, taxDiff: 0, withinTolerance: false };
-  }
+  const baseCandidates = state.settings.requireSameMonth
+    ? sameGstinRows.filter((row) => row.invoiceMonth && row.invoiceMonth === prRow.invoiceMonth)
+    : sameGstinRows;
 
-  let bestCandidate = null;
-  let bestDiff = Number.POSITIVE_INFINITY;
-  let bestAmountMatch = null;
+  if (!baseCandidates.length) return null;
 
-  sameMonthCandidates.forEach((candidate) => {
-    const amountMatch = isAmountMatch(bookRow, candidate);
-    const combinedDiff = amountMatch.taxableDiff + amountMatch.taxDiff;
-    if (combinedDiff < bestDiff) {
-      bestDiff = combinedDiff;
-      bestCandidate = candidate;
-      bestAmountMatch = amountMatch;
+  const evaluated = baseCandidates.map((row) => ({ row, ...diffSummary(prRow, row) }));
+  const withinTolerance = evaluated.filter((item) => item.withinTolerance);
+
+  const pool = withinTolerance.length ? withinTolerance : evaluated;
+  pool.sort((a, b) => a.combinedDiff - b.combinedDiff || a.sourceIndex - b.sourceIndex);
+  return {
+    ...pool[0],
+    matchType: withinTolerance.length ? "MATCHED" : "VALUE_DIFFERENCE",
+  };
+}
+
+function reconcile() {
+  syncSettingsFromUi();
+
+  const prRows = state.rawBooks.map((row, idx) => normalizeRow(row, state.mappedBooks, idx));
+  const twoBRows = state.raw2b.map((row, idx) => normalizeRow(row, state.mapped2b, idx));
+
+  const matched = [];
+  const valueDifference = [];
+  const notIn2B = [];
+
+  const prExportRows = [];
+  const twoBExportRows = new Array(twoBRows.length);
+
+  prRows.forEach((prRow) => {
+    const candidate = findCandidate(prRow, twoBRows);
+
+    if (!candidate) {
+      notIn2B.push(buildOutcomeRow(prRow, null, REMARKS.NOT_IN_2B));
+      prExportRows.push(buildPrExportRow(prRow, null, REMARKS.NOT_IN_2B));
+      return;
     }
+
+    candidate.row.used = true;
+    const remark = REMARKS[candidate.matchType];
+    const outcome = buildOutcomeRow(prRow, candidate.row, remark, candidate.taxableDiff, candidate.gstDiff);
+
+    if (candidate.matchType === "MATCHED") {
+      matched.push(outcome);
+    } else {
+      valueDifference.push(outcome);
+    }
+
+    prExportRows.push(buildPrExportRow(prRow, candidate.row, remark, candidate.taxableDiff, candidate.gstDiff));
+    twoBExportRows[candidate.row.sourceIndex] = build2BExportRow(
+      candidate.row,
+      prRow,
+      remark,
+      candidate.taxableDiff,
+      candidate.gstDiff
+    );
   });
 
-  return { candidate: bestCandidate, ...bestAmountMatch };
+  const notInPR = [];
+  twoBRows.forEach((twoBRow) => {
+    if (twoBRow.used) return;
+    const remark = REMARKS.NOT_IN_PR;
+    const outcome = buildOutcomeRow(null, twoBRow, remark);
+    notInPR.push(outcome);
+    twoBExportRows[twoBRow.sourceIndex] = build2BExportRow(twoBRow, null, remark);
+  });
+
+  state.results = {
+    Matched: matched,
+    "Value Difference": valueDifference,
+    "Not in 2B": notIn2B,
+    "Not in PR": notInPR,
+    PurchaseRegisterExport: prExportRows,
+    GSTR2BExport: twoBExportRows.filter(Boolean),
+  };
+
+  document.getElementById("totalBooks").textContent = String(prRows.length);
+  document.getElementById("total2b").textContent = String(twoBRows.length);
+  document.getElementById("matchedCount").textContent = String(matched.length);
+  document.getElementById("missing2bCount").textContent = String(notIn2B.length);
+  document.getElementById("missingBooksCount").textContent = String(notInPR.length);
+  document.getElementById("valueDiffCount").textContent = String(valueDifference.length);
+
+  state.activeTab = "Matched";
+  renderTabs();
+  renderTable();
+  exportBtn.disabled = false;
+}
+
+function buildOutcomeRow(prRow, twoBRow, remark, taxableDiff = "", gstDiff = "") {
+  return {
+    Remark: remark,
+    PR_GSTIN: prRow?.gstin || "",
+    TwoB_GSTIN: twoBRow?.gstin || "",
+    PR_InvoiceDate: prRow?.invoiceDate || "",
+    TwoB_InvoiceDate: twoBRow?.invoiceDate || "",
+    PR_Taxable: prRow?.taxableValue ?? "",
+    TwoB_Taxable: twoBRow?.taxableValue ?? "",
+    PR_TotalGST: prRow?.totalGST ?? "",
+    TwoB_TotalGST: twoBRow?.totalGST ?? "",
+    Taxable_Diff: taxableDiff,
+    GST_Diff: gstDiff,
+  };
+}
+
+function buildPrExportRow(prRow, twoBRow, remark, taxableDiff = "", gstDiff = "") {
+  return {
+    ...prRow.original,
+    Remark: remark,
+    "2B_Taxable": twoBRow?.taxableValue ?? "",
+    "2B_TotalGST": twoBRow?.totalGST ?? "",
+    Taxable_Diff: taxableDiff,
+    GST_Diff: gstDiff,
+  };
+}
+
+function build2BExportRow(twoBRow, prRow, remark, taxableDiff = "", gstDiff = "") {
+  return {
+    ...twoBRow.original,
+    Remark: remark,
+    PR_Taxable: prRow?.taxableValue ?? "",
+    PR_TotalGST: prRow?.totalGST ?? "",
+    Taxable_Diff: taxableDiff,
+    GST_Diff: gstDiff,
+  };
+}
+
+function renderTabs() {
+  const tabs = ["Matched", "Value Difference", "Not in 2B", "Not in PR"];
+  tabButtons.innerHTML = "";
+
+  tabs.forEach((tab) => {
+    const btn = document.createElement("button");
+    btn.className = `tab-btn ${state.activeTab === tab ? "active" : ""}`;
+    btn.textContent = `${tab} (${state.results[tab].length})`;
+    btn.addEventListener("click", () => {
+      state.activeTab = tab;
+      renderTabs();
+      renderTable();
+    });
+    tabButtons.appendChild(btn);
+  });
+}
+
+function renderTable() {
+  const rows = state.results[state.activeTab] || [];
+  if (!rows.length) {
+    resultTable.innerHTML = "<tr><td>No records found.</td></tr>";
+    return;
+  }
+
+  const columns = Object.keys(rows[0]);
+  const thead = `<thead><tr>${columns.map((col) => `<th>${escapeHtml(col)}</th>`).join("")}</tr></thead>`;
+  const tbody = `<tbody>${rows
+    .map(
+      (row) =>
+        `<tr>${columns
+          .map((col) => `<td>${escapeHtml(formatCell(row[col]))}</td>`)
+          .join("")}</tr>`
+    )
+    .join("")}</tbody>`;
+
+  resultTable.innerHTML = thead + tbody;
+}
+
+function exportResults() {
+  const workbook = XLSX.utils.book_new();
+  const prRows = state.results.PurchaseRegisterExport;
+  const twoBRows = state.results.GSTR2BExport;
+
+  const prSheet = XLSX.utils.json_to_sheet(prRows.length ? prRows : [{ Info: "No records found" }]);
+  const twoBSheet = XLSX.utils.json_to_sheet(twoBRows.length ? twoBRows : [{ Info: "No records found" }]);
+
+  XLSX.utils.book_append_sheet(workbook, prSheet, "Purchase Register");
+  XLSX.utils.book_append_sheet(workbook, twoBSheet, "GSTR-2B");
+  XLSX.writeFile(workbook, "reconciliation_results.xlsx");
 }
 
 function normalizeDate(value) {
@@ -201,11 +384,12 @@ function normalizeDate(value) {
   if (!Number.isNaN(date.getTime())) {
     return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
   }
+
   return "";
 }
 
-function pad2(n) {
-  return String(n).padStart(2, "0");
+function formatCell(value) {
+  return typeof value === "number" ? value.toFixed(2) : value ?? "";
 }
 
 function toNumber(value) {
@@ -213,157 +397,8 @@ function toNumber(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
-function reconcile() {
-  const books = state.rawBooks.map((r) => normalizeRow(r, state.mappedBooks));
-  const twoB = state.raw2b.map((r) => normalizeRow(r, state.mapped2b));
-
-  const twoBMap = new Map();
-  twoB.forEach((row, idx) => {
-    const groupKey = row.gstin;
-    const arr = twoBMap.get(groupKey) || [];
-    arr.push({ ...row, sourceIndex: idx, used: false });
-    twoBMap.set(groupKey, arr);
-  });
-
-  const matched = [];
-  const notIn2B = [];
-
-  books.forEach((bookRow, index) => {
-    const groupKey = bookRow.gstin;
-    const candidates = twoBMap.get(groupKey) || [];
-    const { candidate, taxableDiff, taxDiff, withinTolerance } = findBestCandidate(bookRow, candidates);
-
-    if (!candidate) {
-      notIn2B.push({
-        ...flattenRow(bookRow, "Books", index),
-        MatchType: MATCH_TYPES.NOT_IN_2B,
-        Remark: REMARKS[MATCH_TYPES.NOT_IN_2B],
-      });
-      return;
-    }
-    candidate.used = true;
-
-
-    const matchType = withinTolerance ? MATCH_TYPES.MATCHED_AUTO : MATCH_TYPES.MATCH_REVIEW;
-    matched.push({
-      GSTIN: bookRow.gstin,
-      BooksSupplierName: bookRow.supplierName,
-      TwoBSupplierName: candidate.supplierName,
-      BooksInvoiceNo: bookRow.invoiceNo,
-      TwoBInvoiceNo: candidate.invoiceNo,
-      BooksInvoiceDate: bookRow.invoiceDate,
-      TwoBInvoiceDate: candidate.invoiceDate,
-      InvoiceMonth: bookRow.invoiceMonth,
-      MatchType: matchType,
-      Remark: REMARKS[matchType],
-      BooksTaxable: bookRow.taxableValue,
-      TwoBTaxable: candidate.taxableValue,
-      "Taxable Difference": taxableDiff,
-      BooksTotalTax: bookRow.totalTax,
-      TwoBTotalTax: candidate.totalTax,
-      "Tax Difference": taxDiff,
-    });
-  });
-
-  const notInPR = [];
-  twoBMap.forEach((rows) => {
-    rows.forEach((r, index) => {
-      if (!r.used) {
-        notInPR.push({
-          ...flattenRow(r, "2B", index),
-          MatchType: MATCH_TYPES.NOT_IN_PR,
-          Remark: REMARKS[MATCH_TYPES.NOT_IN_PR],
-        });
-      }
-    });
-  });
-
-  state.results = {
-    Matched: matched,
-    "Not in 2B": notIn2B,
-    "Not in PR": notInPR,
-  };
-
-  document.getElementById("totalBooks").textContent = books.length;
-  document.getElementById("total2b").textContent = twoB.length;
-  document.getElementById("matchedCount").textContent = matched.length;
-  document.getElementById("missing2bCount").textContent = notIn2B.length;
-  document.getElementById("missingBooksCount").textContent = notInPR.length;
-
-  renderTabs();
-  state.activeTab = "Matched";
-  renderTable();
-  exportBtn.disabled = false;
-}
-
-function flattenRow(row, source, index) {
-  return {
-    Source: source,
-    RowNo: index + 1,
-    GSTIN: row.gstin,
-    SupplierName: row.supplierName,
-    InvoiceNo: row.invoiceNo,
-    InvoiceDate: row.invoiceDate,
-    TaxableValue: row.taxableValue,
-    IGST: row.igst,
-    CGST: row.cgst,
-    SGST: row.sgst,
-    TotalTax: row.totalTax,
-  };
-}
-
-function renderTabs() {
-  tabButtons.innerHTML = "";
-  Object.keys(state.results).forEach((tab) => {
-    const btn = document.createElement("button");
-    btn.className = `tab-btn ${state.activeTab === tab ? "active" : ""}`;
-    btn.textContent = `${tab} (${state.results[tab].length})`;
-    btn.addEventListener("click", () => {
-      state.activeTab = tab;
-      renderTabs();
-      renderTable();
-    });
-    tabButtons.appendChild(btn);
-  });
-}
-
-function renderTable() {
-  const rows = state.results[state.activeTab] || [];
-  if (!rows.length) {
-    resultTable.innerHTML = "<tr><td>No records found.</td></tr>";
-    return;
-  }
-
-  const columns = Object.keys(rows[0]);
-  const thead = `<thead><tr>${columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("")}</tr></thead>`;
-  const tbody = `<tbody>${rows
-    .map(
-      (row) =>
-        `<tr>${columns
-          .map((col) => `<td>${escapeHtml(formatCell(row[col]))}</td>`)
-          .join("")}</tr>`
-    )
-    .join("")}</tbody>`;
-
-  resultTable.innerHTML = thead + tbody;
-}
-
-function formatCell(value) {
-  if (typeof value === "number") return value.toFixed(2);
-  return value ?? "";
-}
-
-function exportCurrentTab() {
-  const workbook = XLSX.utils.book_new();
-  const sheetsToExport = ["Matched", "Not in 2B", "Not in PR"];
-
-  sheetsToExport.forEach((sheetName) => {
-    const rows = state.results[sheetName] || [];
-    const ws = XLSX.utils.json_to_sheet(rows.length ? rows : [{ Info: "No records found" }]);
-    XLSX.utils.book_append_sheet(workbook, ws, sheetName);
-  });
-
-  XLSX.writeFile(workbook, "reconciliation_results.xlsx");
+function pad2(n) {
+  return String(n).padStart(2, "0");
 }
 
 function escapeHtml(text) {
