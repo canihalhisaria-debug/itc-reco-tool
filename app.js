@@ -12,8 +12,20 @@ const REQUIRED_FIELDS = [
 const MATCH_SETTINGS = {
   taxableTolerance: 50,
   taxTolerance: 10,
-  smartMatch: true,
-  monthOnly: true,
+};
+
+const MATCH_TYPES = {
+  MATCHED_AUTO: "MATCHED_AUTO",
+  MATCH_REVIEW: "MATCH_REVIEW",
+  NOT_IN_2B: "NOT_IN_2B",
+  NOT_IN_PR: "NOT_IN_PR",
+};
+
+const REMARKS = {
+  [MATCH_TYPES.MATCHED_AUTO]: "Auto matched by GSTIN + Amount",
+  [MATCH_TYPES.MATCH_REVIEW]: "Review - amount close",
+  [MATCH_TYPES.NOT_IN_2B]: "Not reflecting in 2B",
+  [MATCH_TYPES.NOT_IN_PR]: "Not recorded in Purchase Register",
 };
 
 const state = {
@@ -25,9 +37,8 @@ const state = {
   mappedBooks: {},
   results: {
     Matched: [],
-    "Missing in 2B": [],
-    "Missing in Books": [],
-    "Value Difference": [],
+    "Not in 2B": [],
+    "Not in PR": [],
   },
   activeTab: "Matched",
 };
@@ -122,16 +133,12 @@ function normalizeRow(row, mapping) {
     sgst: toNumber(row[mapping["SGST"]]),
   };
   normalized.totalTax = normalized.igst + normalized.cgst + normalized.sgst;
-  normalized.key = `${normalized.gstin}|${normalized.supplierName}|${normalized.invoiceNo}|${normalized.invoiceDate}`;
+  normalized.invoiceMonth = monthPart(normalized.invoiceDate);
   return normalized;
 }
 
 function monthPart(date) {
   return date ? date.slice(0, 7) : "";
-}
-
-function invoiceSuffix(invoiceNo) {
-  return invoiceNo.length <= 4 ? invoiceNo : invoiceNo.slice(-4);
 }
 
 function isSameMonth(dateA, dateB) {
@@ -149,38 +156,30 @@ function isAmountMatch(bookRow, twoBRow) {
   };
 }
 
-function findCandidate(bookRow, candidates) {
-  const unusedCandidates = candidates.filter((candidate) => !candidate.used);
-  const exact = unusedCandidates.find(
-    (candidate) =>
-      candidate.gstin === bookRow.gstin &&
-      candidate.supplierName === bookRow.supplierName &&
-      candidate.invoiceNo === bookRow.invoiceNo &&
-      candidate.invoiceDate === bookRow.invoiceDate
+function findBestCandidate(bookRow, candidates) {
+  const sameMonthCandidates = candidates.filter(
+    (candidate) => !candidate.used && candidate.gstin === bookRow.gstin && isSameMonth(candidate.invoiceDate, bookRow.invoiceDate)
   );
-  if (exact) return { candidate: exact, matchType: "EXACT" };
 
-  if (!MATCH_SETTINGS.smartMatch) return { candidate: null, matchType: "" };
+  if (!sameMonthCandidates.length) {
+    return { candidate: null, taxableDiff: 0, taxDiff: 0, withinTolerance: false };
+  }
 
-  const monthMatch = unusedCandidates.find(
-    (candidate) =>
-      candidate.gstin === bookRow.gstin &&
-      candidate.supplierName === bookRow.supplierName &&
-      candidate.invoiceNo === bookRow.invoiceNo &&
-      (!MATCH_SETTINGS.monthOnly || isSameMonth(candidate.invoiceDate, bookRow.invoiceDate))
-  );
-  if (monthMatch) return { candidate: monthMatch, matchType: "MONTH_MATCH" };
+  let bestCandidate = null;
+  let bestDiff = Number.POSITIVE_INFINITY;
+  let bestAmountMatch = null;
 
-  const suffixMatch = unusedCandidates.find(
-    (candidate) =>
-      candidate.gstin === bookRow.gstin &&
-      candidate.supplierName === bookRow.supplierName &&
-      invoiceSuffix(candidate.invoiceNo) === invoiceSuffix(bookRow.invoiceNo) &&
-      (!MATCH_SETTINGS.monthOnly || isSameMonth(candidate.invoiceDate, bookRow.invoiceDate))
-  );
-  if (suffixMatch) return { candidate: suffixMatch, matchType: "SUFFIX_MATCH" };
+  sameMonthCandidates.forEach((candidate) => {
+    const amountMatch = isAmountMatch(bookRow, candidate);
+    const combinedDiff = amountMatch.taxableDiff + amountMatch.taxDiff;
+    if (combinedDiff < bestDiff) {
+      bestDiff = combinedDiff;
+      bestCandidate = candidate;
+      bestAmountMatch = amountMatch;
+    }
+  });
 
-  return { candidate: null, matchType: "" };
+  return { candidate: bestCandidate, ...bestAmountMatch };
 }
 
 function normalizeDate(value) {
@@ -220,81 +219,76 @@ function reconcile() {
 
   const twoBMap = new Map();
   twoB.forEach((row, idx) => {
-    const groupKey = `${row.gstin}|${row.supplierName}`;
+    const groupKey = row.gstin;
     const arr = twoBMap.get(groupKey) || [];
     arr.push({ ...row, sourceIndex: idx, used: false });
     twoBMap.set(groupKey, arr);
   });
 
   const matched = [];
-  const missingIn2B = [];
-  const valueDiff = [];
+  const notIn2B = [];
 
   books.forEach((bookRow, index) => {
-    const groupKey = `${bookRow.gstin}|${bookRow.supplierName}`;
+    const groupKey = bookRow.gstin;
     const candidates = twoBMap.get(groupKey) || [];
-    const { candidate, matchType } = findCandidate(bookRow, candidates);
+    const { candidate, taxableDiff, taxDiff, withinTolerance } = findBestCandidate(bookRow, candidates);
 
     if (!candidate) {
-      missingIn2B.push({ Type: "Missing in 2B", ...flattenRow(bookRow, "Books", index) });
+      notIn2B.push({
+        ...flattenRow(bookRow, "Books", index),
+        MatchType: MATCH_TYPES.NOT_IN_2B,
+        Remark: REMARKS[MATCH_TYPES.NOT_IN_2B],
+      });
       return;
     }
-
-    const { taxableDiff, taxDiff, withinTolerance } = isAmountMatch(bookRow, candidate);
     candidate.used = true;
 
-    if (withinTolerance) {
-      matched.push({
-        GSTIN: bookRow.gstin,
-        SupplierName: bookRow.supplierName,
-        InvoiceNo: bookRow.invoiceNo,
-        InvoiceDate: bookRow.invoiceDate,
-        MatchType: matchType,
-        BooksTaxable: bookRow.taxableValue,
-        TwoBTaxable: candidate.taxableValue,
-        "Taxable Difference": taxableDiff,
-        BooksTotalTax: bookRow.totalTax,
-        TwoBTotalTax: candidate.totalTax,
-        "Tax Difference": taxDiff,
-      });
-    } else {
-      valueDiff.push({
-        GSTIN: bookRow.gstin,
-        SupplierName: bookRow.supplierName,
-        InvoiceNo: bookRow.invoiceNo,
-        InvoiceDate: bookRow.invoiceDate,
-        MatchType: matchType,
-        BooksTaxable: bookRow.taxableValue,
-        TwoBTaxable: candidate.taxableValue,
-        "Taxable Difference": taxableDiff,
-        BooksTotalTax: bookRow.totalTax,
-        TwoBTotalTax: candidate.totalTax,
-        "Tax Difference": taxDiff,
-      });
-    }
+
+    const matchType = withinTolerance ? MATCH_TYPES.MATCHED_AUTO : MATCH_TYPES.MATCH_REVIEW;
+    matched.push({
+      GSTIN: bookRow.gstin,
+      BooksSupplierName: bookRow.supplierName,
+      TwoBSupplierName: candidate.supplierName,
+      BooksInvoiceNo: bookRow.invoiceNo,
+      TwoBInvoiceNo: candidate.invoiceNo,
+      BooksInvoiceDate: bookRow.invoiceDate,
+      TwoBInvoiceDate: candidate.invoiceDate,
+      InvoiceMonth: bookRow.invoiceMonth,
+      MatchType: matchType,
+      Remark: REMARKS[matchType],
+      BooksTaxable: bookRow.taxableValue,
+      TwoBTaxable: candidate.taxableValue,
+      "Taxable Difference": taxableDiff,
+      BooksTotalTax: bookRow.totalTax,
+      TwoBTotalTax: candidate.totalTax,
+      "Tax Difference": taxDiff,
+    });
   });
 
-  const missingInBooks = [];
+  const notInPR = [];
   twoBMap.forEach((rows) => {
     rows.forEach((r, index) => {
       if (!r.used) {
-        missingInBooks.push({ Type: "Missing in Books", ...flattenRow(r, "2B", index) });
+        notInPR.push({
+          ...flattenRow(r, "2B", index),
+          MatchType: MATCH_TYPES.NOT_IN_PR,
+          Remark: REMARKS[MATCH_TYPES.NOT_IN_PR],
+        });
       }
     });
   });
 
   state.results = {
     Matched: matched,
-    "Missing in 2B": missingIn2B,
-    "Missing in Books": missingInBooks,
-    "Value Difference": valueDiff,
+    "Not in 2B": notIn2B,
+    "Not in PR": notInPR,
   };
 
   document.getElementById("totalBooks").textContent = books.length;
   document.getElementById("total2b").textContent = twoB.length;
   document.getElementById("matchedCount").textContent = matched.length;
-  document.getElementById("missing2bCount").textContent = missingIn2B.length;
-  document.getElementById("missingBooksCount").textContent = missingInBooks.length;
+  document.getElementById("missing2bCount").textContent = notIn2B.length;
+  document.getElementById("missingBooksCount").textContent = notInPR.length;
 
   renderTabs();
   state.activeTab = "Matched";
@@ -360,20 +354,16 @@ function formatCell(value) {
 }
 
 function exportCurrentTab() {
-  const rows = state.results[state.activeTab] || [];
-  if (!rows.length) return;
+  const workbook = XLSX.utils.book_new();
+  const sheetsToExport = ["Matched", "Not in 2B", "Not in PR"];
 
-  const ws = XLSX.utils.json_to_sheet(rows);
-  const csv = XLSX.utils.sheet_to_csv(ws);
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
+  sheetsToExport.forEach((sheetName) => {
+    const rows = state.results[sheetName] || [];
+    const ws = XLSX.utils.json_to_sheet(rows.length ? rows : [{ Info: "No records found" }]);
+    XLSX.utils.book_append_sheet(workbook, ws, sheetName);
+  });
 
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `${state.activeTab.replace(/\s+/g, "_")}.csv`;
-  a.click();
-
-  URL.revokeObjectURL(url);
+  XLSX.writeFile(workbook, "reconciliation_results.xlsx");
 }
 
 function escapeHtml(text) {
