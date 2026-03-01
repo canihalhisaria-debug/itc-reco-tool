@@ -1,5 +1,6 @@
 const REQUIRED_FIELDS = [
   "GSTIN",
+  "Supplier Name",
   "Invoice No",
   "Invoice Date",
   "Taxable Value",
@@ -7,6 +8,13 @@ const REQUIRED_FIELDS = [
   "CGST",
   "SGST",
 ];
+
+const MATCH_SETTINGS = {
+  taxableTolerance: 50,
+  taxTolerance: 10,
+  smartMatch: true,
+  monthOnly: true,
+};
 
 const state = {
   raw2b: [],
@@ -105,6 +113,7 @@ function updateReconcileButtonState() {
 function normalizeRow(row, mapping) {
   const normalized = {
     gstin: String(row[mapping["GSTIN"]] || "").trim().toUpperCase(),
+    supplierName: String(row[mapping["Supplier Name"]] || "").trim().toUpperCase(),
     invoiceNo: String(row[mapping["Invoice No"]] || "").trim().toUpperCase(),
     invoiceDate: normalizeDate(row[mapping["Invoice Date"]]),
     taxableValue: toNumber(row[mapping["Taxable Value"]]),
@@ -113,8 +122,65 @@ function normalizeRow(row, mapping) {
     sgst: toNumber(row[mapping["SGST"]]),
   };
   normalized.totalTax = normalized.igst + normalized.cgst + normalized.sgst;
-  normalized.key = `${normalized.gstin}|${normalized.invoiceNo}|${normalized.invoiceDate}`;
+  normalized.key = `${normalized.gstin}|${normalized.supplierName}|${normalized.invoiceNo}|${normalized.invoiceDate}`;
   return normalized;
+}
+
+function monthPart(date) {
+  return date ? date.slice(0, 7) : "";
+}
+
+function invoiceSuffix(invoiceNo) {
+  return invoiceNo.length <= 4 ? invoiceNo : invoiceNo.slice(-4);
+}
+
+function isSameMonth(dateA, dateB) {
+  return Boolean(monthPart(dateA) && monthPart(dateA) === monthPart(dateB));
+}
+
+function isAmountMatch(bookRow, twoBRow) {
+  const taxableDiff = Math.abs(bookRow.taxableValue - twoBRow.taxableValue);
+  const taxDiff = Math.abs(bookRow.totalTax - twoBRow.totalTax);
+  return {
+    taxableDiff,
+    taxDiff,
+    withinTolerance:
+      taxableDiff <= MATCH_SETTINGS.taxableTolerance && taxDiff <= MATCH_SETTINGS.taxTolerance,
+  };
+}
+
+function findCandidate(bookRow, candidates) {
+  const unusedCandidates = candidates.filter((candidate) => !candidate.used);
+  const exact = unusedCandidates.find(
+    (candidate) =>
+      candidate.gstin === bookRow.gstin &&
+      candidate.supplierName === bookRow.supplierName &&
+      candidate.invoiceNo === bookRow.invoiceNo &&
+      candidate.invoiceDate === bookRow.invoiceDate
+  );
+  if (exact) return { candidate: exact, matchType: "EXACT" };
+
+  if (!MATCH_SETTINGS.smartMatch) return { candidate: null, matchType: "" };
+
+  const monthMatch = unusedCandidates.find(
+    (candidate) =>
+      candidate.gstin === bookRow.gstin &&
+      candidate.supplierName === bookRow.supplierName &&
+      candidate.invoiceNo === bookRow.invoiceNo &&
+      (!MATCH_SETTINGS.monthOnly || isSameMonth(candidate.invoiceDate, bookRow.invoiceDate))
+  );
+  if (monthMatch) return { candidate: monthMatch, matchType: "MONTH_MATCH" };
+
+  const suffixMatch = unusedCandidates.find(
+    (candidate) =>
+      candidate.gstin === bookRow.gstin &&
+      candidate.supplierName === bookRow.supplierName &&
+      invoiceSuffix(candidate.invoiceNo) === invoiceSuffix(bookRow.invoiceNo) &&
+      (!MATCH_SETTINGS.monthOnly || isSameMonth(candidate.invoiceDate, bookRow.invoiceDate))
+  );
+  if (suffixMatch) return { candidate: suffixMatch, matchType: "SUFFIX_MATCH" };
+
+  return { candidate: null, matchType: "" };
 }
 
 function normalizeDate(value) {
@@ -154,9 +220,10 @@ function reconcile() {
 
   const twoBMap = new Map();
   twoB.forEach((row, idx) => {
-    const arr = twoBMap.get(row.key) || [];
+    const groupKey = `${row.gstin}|${row.supplierName}`;
+    const arr = twoBMap.get(groupKey) || [];
     arr.push({ ...row, sourceIndex: idx, used: false });
-    twoBMap.set(row.key, arr);
+    twoBMap.set(groupKey, arr);
   });
 
   const matched = [];
@@ -164,40 +231,45 @@ function reconcile() {
   const valueDiff = [];
 
   books.forEach((bookRow, index) => {
-    const candidates = twoBMap.get(bookRow.key) || [];
-    const unused = candidates.find((c) => !c.used);
+    const groupKey = `${bookRow.gstin}|${bookRow.supplierName}`;
+    const candidates = twoBMap.get(groupKey) || [];
+    const { candidate, matchType } = findCandidate(bookRow, candidates);
 
-    if (!unused) {
+    if (!candidate) {
       missingIn2B.push({ Type: "Missing in 2B", ...flattenRow(bookRow, "Books", index) });
       return;
     }
 
-    const taxableDiff = Math.abs(bookRow.taxableValue - unused.taxableValue);
-    const taxDiff = Math.abs(bookRow.totalTax - unused.totalTax);
+    const { taxableDiff, taxDiff, withinTolerance } = isAmountMatch(bookRow, candidate);
+    candidate.used = true;
 
-    if (taxableDiff <= 5 && taxDiff <= 5) {
-      unused.used = true;
+    if (withinTolerance) {
       matched.push({
         GSTIN: bookRow.gstin,
+        SupplierName: bookRow.supplierName,
         InvoiceNo: bookRow.invoiceNo,
         InvoiceDate: bookRow.invoiceDate,
+        MatchType: matchType,
         BooksTaxable: bookRow.taxableValue,
-        TwoBTaxable: unused.taxableValue,
+        TwoBTaxable: candidate.taxableValue,
+        "Taxable Difference": taxableDiff,
         BooksTotalTax: bookRow.totalTax,
-        TwoBTotalTax: unused.totalTax,
+        TwoBTotalTax: candidate.totalTax,
+        "Tax Difference": taxDiff,
       });
     } else {
-      unused.used = true;
       valueDiff.push({
         GSTIN: bookRow.gstin,
+        SupplierName: bookRow.supplierName,
         InvoiceNo: bookRow.invoiceNo,
         InvoiceDate: bookRow.invoiceDate,
+        MatchType: matchType,
         BooksTaxable: bookRow.taxableValue,
-        TwoBTaxable: unused.taxableValue,
-        TaxableDifference: taxableDiff,
+        TwoBTaxable: candidate.taxableValue,
+        "Taxable Difference": taxableDiff,
         BooksTotalTax: bookRow.totalTax,
-        TwoBTotalTax: unused.totalTax,
-        TotalTaxDifference: taxDiff,
+        TwoBTotalTax: candidate.totalTax,
+        "Tax Difference": taxDiff,
       });
     }
   });
@@ -235,6 +307,7 @@ function flattenRow(row, source, index) {
     Source: source,
     RowNo: index + 1,
     GSTIN: row.gstin,
+    SupplierName: row.supplierName,
     InvoiceNo: row.invoiceNo,
     InvoiceDate: row.invoiceDate,
     TaxableValue: row.taxableValue,
