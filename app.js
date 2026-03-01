@@ -341,15 +341,23 @@ function renderTable() {
   const columns = Object.keys(rows[0]);
   const thead = `<thead><tr>${columns.map((col) => `<th>${escapeHtml(col)}</th>`).join("")}</tr></thead>`;
   const tbody = `<tbody>${rows
-    .map(
-      (row) =>
-        `<tr>${columns
-          .map((col) => `<td>${escapeHtml(formatCell(row[col]))}</td>`)
-          .join("")}</tr>`
-    )
+    .map((row) => {
+      const remarkClass = getRemarkClass(row.Remark);
+      return `<tr class="${remarkClass}">${columns
+        .map((col) => `<td>${escapeHtml(formatCell(row[col]))}</td>`)
+        .join("")}</tr>`;
+    })
     .join("")}</tbody>`;
 
   resultTable.innerHTML = thead + tbody;
+}
+
+function getRemarkClass(remark) {
+  if (!remark) return "";
+  return `remark-${String(remark)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")}`;
 }
 
 function exportResults() {

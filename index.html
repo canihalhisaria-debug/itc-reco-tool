@@ -4,6 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>GSTR-2B vs Purchase Register Reconciliation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+    rel="stylesheet"
+  />
   <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
 </head>
@@ -71,10 +77,10 @@
     <section class="summary-grid" id="summaryCards">
       <article class="summary-card"><h4>Total Books Invoices</h4><p id="totalBooks">0</p></article>
       <article class="summary-card"><h4>Total 2B Invoices</h4><p id="total2b">0</p></article>
-      <article class="summary-card"><h4>Matched</h4><p id="matchedCount">0</p></article>
-      <article class="summary-card"><h4>Not in 2B</h4><p id="missing2bCount">0</p></article>
-      <article class="summary-card"><h4>Not in PR</h4><p id="missingBooksCount">0</p></article>
-      <article class="summary-card"><h4>Value Difference</h4><p id="valueDiffCount">0</p></article>
+      <article class="summary-card tone-success"><h4>Matched</h4><p id="matchedCount">0</p></article>
+      <article class="summary-card tone-danger"><h4>Not in 2B</h4><p id="missing2bCount">0</p></article>
+      <article class="summary-card tone-danger"><h4>Not in PR</h4><p id="missingBooksCount">0</p></article>
+      <article class="summary-card tone-warning"><h4>Value Difference</h4><p id="valueDiffCount">0</p></article>
     </section>
 
     <section class="card" id="resultsSection">
