@@ -124,7 +124,7 @@ function renderMapping(type) {
 }
 
 function hasTaxSource(mapping) {
-  return Boolean(mapping["Total Tax"]) || Boolean(mapping["IGST"]) || Boolean(mapping["CGST"]) || Boolean(mapping["SGST"]);
+  return Boolean(mapping["Total Tax"]) || Boolean(mapping["IGST"]) || Boolean(mapping["CGST"]) || Boolean(mapping["SGST"]) || Boolean(mapping.CESS);
 }
 
 function hasMinimumMapping(mapping) {
@@ -159,7 +159,8 @@ function normalizeRow(row, mapping, sourceIndex) {
   const cess = roundTo2(toNumber(getMapped(row, mapping, "CESS")));
   const totalTaxMapped = roundTo2(toNumber(getMapped(row, mapping, "Total Tax")));
 
-  const totalTax = mapping["Total Tax"] ? totalTaxMapped : roundTo2(igst + cgst + sgst + cess);
+  const totalTaxBase = mapping["Total Tax"] ? totalTaxMapped : roundTo2(igst + cgst + sgst);
+  const totalTax = roundTo2(totalTaxBase + cess);
   const dateSource = getMapped(row, mapping, "Invoice Date");
   const invoiceDate = normalizeDate(dateSource);
 
@@ -415,9 +416,9 @@ function buildPrExportRow(prRow, twoBRow, remark, taxableDiff = "", taxDiff = ""
     Remark: remark,
     MatchMode: mode,
     Reason: reason,
+    MatchedSideTaxable: twoBRow?.taxableValue ?? "",
+    MatchedSideTotalTax: twoBRow?.totalTax ?? "",
     TotalTax: prRow.totalTax,
-    TwoB_TotalTax: twoBRow?.totalTax ?? "",
-    TwoB_TaxableValue: twoBRow?.taxableValue ?? "",
     TaxableDiff: taxableDiff,
     TaxDiff: taxDiff,
   };
@@ -429,9 +430,9 @@ function build2BExportRow(twoBRow, prRow, remark, taxableDiff = "", taxDiff = ""
     Remark: remark,
     MatchMode: mode,
     Reason: reason,
+    MatchedSideTaxable: prRow?.taxableValue ?? "",
+    MatchedSideTotalTax: prRow?.totalTax ?? "",
     TotalTax: twoBRow.totalTax,
-    PR_TotalTax: prRow?.totalTax ?? "",
-    PR_TaxableValue: prRow?.taxableValue ?? "",
     TaxableDiff: taxableDiff,
     TaxDiff: taxDiff,
   };
@@ -491,21 +492,24 @@ function exportResults() {
   const prRows = state.results.PurchaseRegisterExport;
   const twoBRows = state.results.GSTR2BExport;
 
-  downloadCsv("PR_with_Remarks.csv", prRows.length ? prRows : [{ Info: "No records found" }]);
-  downloadCsv("2B_with_Remarks.csv", twoBRows.length ? twoBRows : [{ Info: "No records found" }]);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(prRows.length ? prRows : [{ Info: "No records found" }]), "PR_with_Remarks");
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(twoBRows.length ? twoBRows : [{ Info: "No records found" }]), "2B_with_Remarks");
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(buildSummaryRows()), "Summary");
+  XLSX.writeFile(workbook, "ITC_Reco_Output.xlsx");
 }
 
-function downloadCsv(fileName, rows) {
-  const sheet = XLSX.utils.json_to_sheet(rows);
-  const csv = XLSX.utils.sheet_to_csv(sheet);
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  link.download = fileName;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(link.href);
+function buildSummaryRows() {
+  return [
+    { Metric: "Total Books Invoices", Value: document.getElementById("totalBooks").textContent },
+    { Metric: "Total 2B Invoices", Value: document.getElementById("total2b").textContent },
+    { Metric: "Matched", Value: document.getElementById("matchedCount").textContent },
+    { Metric: "Not in 2B", Value: document.getElementById("missing2bCount").textContent },
+    { Metric: "Not in PR", Value: document.getElementById("missingBooksCount").textContent },
+    { Metric: "Value Difference", Value: document.getElementById("valueDiffCount").textContent },
+    { Metric: "Taxable Tolerance", Value: String(state.settings.taxableTolerance) },
+    { Metric: "Tax Tolerance", Value: String(state.settings.taxTolerance) },
+  ];
 }
 
 function normalizeDate(value) {
