@@ -261,14 +261,7 @@ function reconcile() {
     },
     {
       mode: "AmountBased",
-      getCandidates: (prRow) =>
-        twoBRows.filter(
-          (row) =>
-            !row.used &&
-            row.gstin === prRow.gstin &&
-            // Amount-based fallback should not override available invoice-based matching.
-            (!prRow.invoiceNoNorm || !row.invoiceNoNorm)
-        ),
+      getCandidates: (prRow) => twoBRows.filter((row) => !row.used && row.gstin === prRow.gstin),
     },
   ];
 
@@ -303,24 +296,7 @@ function reconcile() {
 
     const gstMatches = twoBRows.filter((row) => !row.used && row.gstin === prRow.gstin);
     const invoiceMatches = gstMatches.filter((row) => row.invoiceNoNorm && row.invoiceNoNorm === prRow.invoiceNoNorm);
-    const invoiceOnlyMatches = prRow.invoiceNoNorm
-      ? twoBRows.filter((row) => !row.used && row.invoiceNoNorm && row.invoiceNoNorm === prRow.invoiceNoNorm)
-      : [];
-    const gstAmountFallbackMatches = gstMatches.filter((row) => !prRow.invoiceNoNorm || !row.invoiceNoNorm);
-
-    let fallbackPool = [];
-    let mode = "AmountBased";
-
-    if (invoiceMatches.length) {
-      fallbackPool = invoiceMatches;
-      mode = "InvoiceBased";
-    } else if (invoiceOnlyMatches.length) {
-      fallbackPool = invoiceOnlyMatches;
-      mode = "InvoiceOnly";
-    } else if (gstAmountFallbackMatches.length) {
-      fallbackPool = gstAmountFallbackMatches;
-      mode = "AmountBased";
-    }
+    const fallbackPool = invoiceMatches.length ? invoiceMatches : gstMatches;
 
     const closest = findClosestDifference(prRow, fallbackPool);
 
@@ -333,6 +309,7 @@ function reconcile() {
 
     prRow.used = true;
     closest.row.used = true;
+    const mode = invoiceMatches.length ? "InvoiceBased" : "AmountBased";
     const reason = buildDiffReason(prRow, closest.row, closest, mode);
     valueDifference.push(buildOutcomeRow(prRow, closest.row, REMARKS.VALUE_DIFFERENCE, closest.taxableDiff, closest.taxDiff, mode, reason));
 
