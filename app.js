@@ -10,8 +10,8 @@ const REQUIRED_FIELDS = [
 ];
 
 const DEFAULT_SETTINGS = {
-  taxableTolerance: 50,
-  taxTolerance: 10,
+  taxableTolerance: 1,
+  taxTolerance: 1,
   requireSameMonth: true,
 };
 
@@ -147,6 +147,11 @@ function syncSettingsFromUi() {
 }
 
 function normalizeRow(row, mapping, sourceIndex) {
+  const taxableValue = roundTo2(toNumber(row[mapping["Taxable Value"]]));
+  const igst = toNumber(row[mapping["IGST"]]);
+  const cgst = toNumber(row[mapping["CGST"]]);
+  const sgst = toNumber(row[mapping["SGST"]]);
+
   const normalized = {
     original: { ...row },
     sourceIndex,
@@ -154,14 +159,14 @@ function normalizeRow(row, mapping, sourceIndex) {
     supplierName: String(row[mapping["Supplier Name"]] || "").trim(),
     invoiceNo: String(row[mapping["Invoice No"]] || "").trim(),
     invoiceDate: normalizeDate(row[mapping["Invoice Date"]]),
-    taxableValue: toNumber(row[mapping["Taxable Value"]]),
-    igst: toNumber(row[mapping["IGST"]]),
-    cgst: toNumber(row[mapping["CGST"]]),
-    sgst: toNumber(row[mapping["SGST"]]),
+    taxableValue,
+    igst,
+    cgst,
+    sgst,
     used: false,
   };
 
-  normalized.totalGST = normalized.igst + normalized.cgst + normalized.sgst;
+  normalized.totalGST = roundTo2(normalized.igst + normalized.cgst + normalized.sgst);
   normalized.invoiceMonth = monthPart(normalized.invoiceDate);
   return normalized;
 }
@@ -171,14 +176,16 @@ function monthPart(date) {
 }
 
 function diffSummary(prRow, twoBRow) {
-  const taxableDiff = Math.abs(prRow.taxableValue - twoBRow.taxableValue);
-  const gstDiff = Math.abs(prRow.totalGST - twoBRow.totalGST);
+  const taxableDiff = roundTo2(Math.abs(prRow.taxableValue - twoBRow.taxableValue));
+  const gstDiff = roundTo2(Math.abs(prRow.totalGST - twoBRow.totalGST));
+  const taxableTolerance = roundTo2(state.settings.taxableTolerance);
+  const taxTolerance = roundTo2(state.settings.taxTolerance);
+
   return {
     taxableDiff,
     gstDiff,
-    withinTolerance:
-      taxableDiff <= state.settings.taxableTolerance && gstDiff <= state.settings.taxTolerance,
-    combinedDiff: taxableDiff + gstDiff,
+    withinTolerance: isWithinTolerance(taxableDiff, taxableTolerance) && isWithinTolerance(gstDiff, taxTolerance),
+    combinedDiff: roundTo2(taxableDiff + gstDiff),
   };
 }
 
@@ -495,7 +502,7 @@ function normalizeDate(value) {
 
   const date = new Date(str);
   if (!Number.isNaN(date.getTime())) {
-    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+    return `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())}`;
   }
 
   return "";
@@ -508,6 +515,14 @@ function formatCell(value) {
 function toNumber(value) {
   const n = parseFloat(String(value ?? "").replace(/,/g, "").trim());
   return Number.isFinite(n) ? n : 0;
+}
+
+function roundTo2(value) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+function isWithinTolerance(diff, tolerance) {
+  return Math.abs(diff) <= tolerance + Number.EPSILON;
 }
 
 function pad2(n) {
