@@ -45,7 +45,25 @@
           <div id="mapBooks" class="mapping-list"></div>
         </div>
       </div>
-      <div class="actions">
+    </section>
+
+    <section class="card">
+      <h2>3) Matching Settings</h2>
+      <div class="upload-grid">
+        <label class="field">
+          <span>Taxable Tolerance</span>
+          <input type="number" id="taxableTolerance" value="50" min="0" step="0.01" />
+        </label>
+        <label class="field">
+          <span>Tax Tolerance</span>
+          <input type="number" id="taxTolerance" value="10" min="0" step="0.01" />
+        </label>
+      </div>
+      <label class="field" style="margin-top: 0.75rem; display: inline-flex; gap: 0.5rem; align-items: center;">
+        <input type="checkbox" id="requireSameMonth" checked />
+        <span>Require Same Month</span>
+      </label>
+      <div class="actions" style="margin-top: 1rem;">
         <button id="reconcileBtn" disabled>Run Reconciliation</button>
       </div>
     </section>
@@ -53,16 +71,17 @@
     <section class="summary-grid" id="summaryCards">
       <article class="summary-card"><h4>Total Books Invoices</h4><p id="totalBooks">0</p></article>
       <article class="summary-card"><h4>Total 2B Invoices</h4><p id="total2b">0</p></article>
-      <article class="summary-card"><h4>Matched Count</h4><p id="matchedCount">0</p></article>
-      <article class="summary-card"><h4>Not in 2B Count</h4><p id="missing2bCount">0</p></article>
-      <article class="summary-card"><h4>Not in PR Count</h4><p id="missingBooksCount">0</p></article>
+      <article class="summary-card"><h4>Matched</h4><p id="matchedCount">0</p></article>
+      <article class="summary-card"><h4>Not in 2B</h4><p id="missing2bCount">0</p></article>
+      <article class="summary-card"><h4>Not in PR</h4><p id="missingBooksCount">0</p></article>
+      <article class="summary-card"><h4>Value Difference</h4><p id="valueDiffCount">0</p></article>
     </section>
 
     <section class="card" id="resultsSection">
       <h2>4) Results</h2>
       <div class="tabs" id="tabButtons"></div>
       <div class="tab-toolbar">
-        <button id="exportBtn" disabled>Export Excel (3 Sheets)</button>
+        <button id="exportBtn" disabled>Export Excel (2 Sheets)</button>
       </div>
       <div class="table-wrap">
         <table id="resultTable"></table>
