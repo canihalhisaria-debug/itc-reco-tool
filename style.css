@@ -211,6 +211,23 @@ button:disabled {
   color: #9a3412;
 }
 
+
+.debug-tip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: 6px;
+  border-radius: 999px;
+  border: 1px solid #bfdbfe;
+  color: #1d4ed8;
+  font-size: 0.72rem;
+  font-weight: 700;
+  background: #eff6ff;
+  cursor: help;
+}
+
 .actions,
 .tab-toolbar {
   margin-top: 12px;
