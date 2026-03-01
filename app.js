@@ -365,12 +365,117 @@ function exportResults() {
   const prRows = state.results.PurchaseRegisterExport;
   const twoBRows = state.results.GSTR2BExport;
 
-  const prSheet = XLSX.utils.json_to_sheet(prRows.length ? prRows : [{ Info: "No records found" }]);
-  const twoBSheet = XLSX.utils.json_to_sheet(twoBRows.length ? twoBRows : [{ Info: "No records found" }]);
+  const prSheetRows = prRows.length ? prRows : [{ Info: "No records found" }];
+  const twoBSheetRows = twoBRows.length ? twoBRows : [{ Info: "No records found" }];
+
+  const prSheet = XLSX.utils.json_to_sheet(prSheetRows);
+  const twoBSheet = XLSX.utils.json_to_sheet(twoBSheetRows);
+
+  styleExportSheet(prSheet, prSheetRows);
+  styleExportSheet(twoBSheet, twoBSheetRows);
 
   XLSX.utils.book_append_sheet(workbook, prSheet, "Purchase Register");
   XLSX.utils.book_append_sheet(workbook, twoBSheet, "GSTR-2B");
   XLSX.writeFile(workbook, "reconciliation_results.xlsx");
+}
+
+function styleExportSheet(worksheet, rows) {
+  const range = XLSX.utils.decode_range(worksheet["!ref"] || "A1");
+  const headers = rows.length ? Object.keys(rows[0]) : [];
+
+  const headerStyle = {
+    font: { bold: true, sz: 12 },
+    fill: { patternType: "solid", fgColor: { rgb: "FFEFEFEF" } },
+  };
+
+  const amountStyle = { numFmt: "#,##0.00" };
+  const dateStyle = { numFmt: "dd-mmm-yyyy" };
+
+  const remarkFills = {
+    [REMARKS.MATCHED]: { patternType: "solid", fgColor: { rgb: "FFD9EAD3" } },
+    [REMARKS.NOT_IN_2B]: { patternType: "solid", fgColor: { rgb: "FFF4CCCC" } },
+    [REMARKS.NOT_IN_PR]: { patternType: "solid", fgColor: { rgb: "FFF4CCCC" } },
+    [REMARKS.VALUE_DIFFERENCE]: { patternType: "solid", fgColor: { rgb: "FFFFF2CC" } },
+  };
+
+  const amountColumns = new Set(
+    headers
+      .map((header, index) => ({ header, index }))
+      .filter(({ header }) => /taxable|igst|cgst|sgst|totalgst|gst_diff|taxable_diff|total gst/i.test(header))
+      .map(({ index }) => index)
+  );
+
+  const dateColumns = new Set(
+    headers
+      .map((header, index) => ({ header, index }))
+      .filter(({ header }) => /date/i.test(header))
+      .map(({ index }) => index)
+  );
+
+  const remarkIndex = headers.findIndex((header) => /^remark$/i.test(header));
+
+  worksheet["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: 0, c: range.e.c } }) };
+  worksheet["!freeze"] = { xSplit: 0, ySplit: 1, topLeftCell: "A2", activePane: "bottomLeft", state: "frozen" };
+
+  worksheet["!cols"] = headers.map((header) => ({ wch: getColumnWidth(header) }));
+
+  for (let col = range.s.c; col <= range.e.c; col += 1) {
+    const address = XLSX.utils.encode_cell({ r: 0, c: col });
+    if (!worksheet[address]) continue;
+    worksheet[address].s = { ...(worksheet[address].s || {}), ...headerStyle };
+  }
+
+  for (let rowIndex = 1; rowIndex <= range.e.r; rowIndex += 1) {
+    const remarkCellAddress = remarkIndex >= 0 ? XLSX.utils.encode_cell({ r: rowIndex, c: remarkIndex }) : "";
+    const remarkValue = remarkCellAddress && worksheet[remarkCellAddress] ? worksheet[remarkCellAddress].v : "";
+    const remarkFill = remarkFills[String(remarkValue || "").trim()];
+
+    for (let col = range.s.c; col <= range.e.c; col += 1) {
+      const cellAddress = XLSX.utils.encode_cell({ r: rowIndex, c: col });
+      const cell = worksheet[cellAddress];
+      if (!cell) continue;
+
+      let style = { ...(cell.s || {}) };
+
+      if (amountColumns.has(col) && typeof cell.v === "number") {
+        style = { ...style, ...amountStyle };
+      }
+
+      if (dateColumns.has(col) && cell.v) {
+        const parsedDate = normalizeDate(cell.v);
+        if (parsedDate) {
+          const [year, month, day] = parsedDate.split("-").map(Number);
+          cell.v = new Date(Date.UTC(year, month - 1, day));
+          cell.t = "d";
+          style = { ...style, ...dateStyle };
+        }
+      }
+
+      if (remarkFill) {
+        style = { ...style, fill: remarkFill };
+      }
+
+      cell.s = style;
+    }
+  }
+}
+
+function getColumnWidth(header) {
+  const normalized = String(header || "").toLowerCase();
+
+  if (normalized.includes("gstin")) return 18;
+  if (normalized.includes("supplier")) return 30;
+  if (normalized.includes("invoice") && normalized.includes("no")) return 18;
+  if (normalized.includes("date")) return 14;
+  if (normalized.includes("taxable")) return 16;
+  if (normalized === "igst" || normalized.endsWith("_igst") || normalized.includes(" igst")) return 14;
+  if (normalized === "cgst" || normalized.endsWith("_cgst") || normalized.includes(" cgst")) return 14;
+  if (normalized === "sgst" || normalized.endsWith("_sgst") || normalized.includes(" sgst")) return 14;
+  if (normalized.includes("totalgst") || normalized.includes("total gst")) return 14;
+  if (normalized.includes("diff")) return 14;
+  if (normalized.includes("remark")) return 16;
+
+  return 16;
 }
 
 function normalizeDate(value) {
