@@ -20,7 +20,7 @@
 body {
   margin: 0;
   font-family: system-ui, "Segoe UI", Roboto, Arial, sans-serif;
-  font-size: 14px;
+  font-size: 15px;
   background: linear-gradient(180deg, #f8fbff 0%, var(--bg) 100%);
   color: var(--text);
   line-height: 1.5;
@@ -367,7 +367,7 @@ td {
   text-align: left;
   padding: 12px;
   border-bottom: 1px solid #e9edf5;
-  font-size: 0.9rem;
+  font-size: 0.95rem;
   white-space: nowrap;
 }
 
@@ -377,7 +377,7 @@ th {
   z-index: 1;
   background: #f8fafc;
   color: #334155;
-  font-size: 0.86rem;
+  font-size: 0.9rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
