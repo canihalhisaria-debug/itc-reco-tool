@@ -19,8 +19,8 @@
 
 body {
   margin: 0;
-  font-family: "Inter", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  font-size: 16px;
+  font-family: system-ui, "Segoe UI", Roboto, Arial, sans-serif;
+  font-size: 14px;
   background: linear-gradient(180deg, #f8fbff 0%, var(--bg) 100%);
   color: var(--text);
   line-height: 1.5;
@@ -47,14 +47,14 @@ header p {
 
 h2 {
   margin: 0 0 12px;
-  font-size: 1.12rem;
-  font-weight: 650;
+  font-size: 1rem;
+  font-weight: 600;
   letter-spacing: -0.01em;
 }
 
 h3 {
   margin: 0 0 10px;
-  font-size: 0.98rem;
+  font-size: 0.95rem;
   font-weight: 600;
 }
 
@@ -192,23 +192,23 @@ button:disabled {
   padding: 4px 10px;
   border-radius: 999px;
   font-weight: 600;
-  font-size: 0.76rem;
+  font-size: 0.78rem;
 }
 
 .remark-badge.remark-matched {
-  background: #dcfce7;
-  color: #166534;
+  background: #e8f6ee;
+  color: #17603a;
 }
 
 .remark-badge.remark-not-in-2b,
 .remark-badge.remark-not-in-pr {
-  background: #fee2e2;
-  color: #991b1b;
+  background: #fdecec;
+  color: #9b1c1c;
 }
 
 .remark-badge.remark-value-difference {
-  background: #ffedd5;
-  color: #9a3412;
+  background: #fff3df;
+  color: #9a5208;
 }
 
 
@@ -233,6 +233,22 @@ button:disabled {
   margin-top: 12px;
 }
 
+
+.results-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 10px;
+  align-items: end;
+}
+
+.results-controls .field {
+  flex: 1 1 340px;
+}
+
+.group-toggle-row {
+  min-width: 170px;
+}
 .party-filters {
   display: flex;
   flex-wrap: wrap;
@@ -343,7 +359,7 @@ table {
   width: 100%;
   border-collapse: separate;
   border-spacing: 0;
-  min-width: 980px;
+  min-width: 1120px;
 }
 
 th,
@@ -351,7 +367,7 @@ td {
   text-align: left;
   padding: 12px;
   border-bottom: 1px solid #e9edf5;
-  font-size: 0.92rem;
+  font-size: 0.9rem;
   white-space: nowrap;
 }
 
@@ -361,14 +377,14 @@ th {
   z-index: 1;
   background: #f8fafc;
   color: #334155;
-  font-size: 0.75rem;
-  font-weight: 700;
+  font-size: 0.86rem;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
 
 tbody tr:nth-child(even) {
-  background: #fbfcfe;
+  background: #f8fafc;
 }
 
 tbody tr:hover {
@@ -403,4 +419,47 @@ tbody tr:hover {
   .tab-btn {
     width: 100%;
   }
+}
+
+
+.party-group-header td {
+  background: #eef4ff;
+  border-bottom: 1px solid #d9e4fb;
+  padding: 10px 12px;
+  position: sticky;
+  left: 0;
+}
+
+.party-group-head {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.party-id {
+  font-weight: 600;
+  color: #1e3a8a;
+}
+
+.party-meta,
+.party-totals {
+  font-size: 0.82rem;
+  color: #334155;
+}
+
+.col-num {
+  text-align: right;
+}
+
+.col-date {
+  text-align: center;
+}
+
+.col-supplier {
+  min-width: 220px;
+}
+
+.col-invoice {
+  min-width: 160px;
 }
