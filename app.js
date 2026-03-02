@@ -23,6 +23,22 @@ const REMARKS = {
   NOT_IN_PR: "Not in PR",
 };
 
+
+const EXPORT_COLUMNS = ["GSTIN", "SupplierName", "InvoiceNo", "InvoiceDate", "TaxableValue", "IGST", "CGST", "SGST", "CESS", "Remark"];
+const EXCLUDED_RESULT_COLUMNS = new Set([
+  "MatchMode",
+  "GSTINMismatch",
+  "Reason",
+  "MatchedSideTaxable",
+  "MatchedSideTotalTax",
+  "MatchedSideCESS",
+  "ComputedTotalTax",
+  "ComputedCESS",
+  "TaxableDiff",
+  "TaxDiff",
+  "CessDiff",
+]);
+
 const state = {
   raw2b: [],
   rawBooks: [],
@@ -56,7 +72,8 @@ const mapBooksEl = document.getElementById("mapBooks");
 const reconcileBtn = document.getElementById("reconcileBtn");
 const tabButtons = document.getElementById("tabButtons");
 const resultTable = document.getElementById("resultTable");
-const exportBtn = document.getElementById("exportBtn");
+const exportPrBtn = document.getElementById("exportPrBtn");
+const export2bBtn = document.getElementById("export2bBtn");
 const taxableToleranceInput = document.getElementById("taxableTolerance");
 const taxToleranceInput = document.getElementById("taxTolerance");
 const partySearchInput = document.getElementById("partySearch");
@@ -68,7 +85,8 @@ const groupByPartyToggle = document.getElementById("groupByPartyToggle");
 file2bInput.addEventListener("change", (e) => handleFile(e.target.files[0], "2b"));
 fileBooksInput.addEventListener("change", (e) => handleFile(e.target.files[0], "books"));
 reconcileBtn.addEventListener("click", reconcile);
-exportBtn.addEventListener("click", exportResults);
+exportPrBtn.addEventListener("click", () => exportDataset("PR"));
+export2bBtn.addEventListener("click", () => exportDataset("2B"));
 
 [taxableToleranceInput, taxToleranceInput].forEach((input) => {
   input.addEventListener("change", syncSettingsFromUi);
@@ -419,7 +437,8 @@ function reconcile() {
   state.activeTab = "Matched";
   renderTabs();
   renderTable();
-  exportBtn.disabled = false;
+  exportPrBtn.disabled = false;
+  export2bBtn.disabled = false;
 }
 
 function buildMatchReason(mode, prRow, twoBRow) {
@@ -456,12 +475,8 @@ function buildNotFoundReason(prRow, twoBRow = null) {
 }
 
 function buildOutcomeRow(prRow, twoBRow, remark, taxableDiff = "", gstDiff = "", cessDiff = "", mode = "", reason = "") {
-  const gstinMismatch = Boolean(prRow?.gstin && twoBRow?.gstin && prRow.gstin !== twoBRow.gstin);
   return {
     Remark: remark,
-    MatchMode: mode,
-    GSTINMismatch: gstinMismatch,
-    Reason: reason,
     PR_GSTIN: prRow?.gstin || "",
     TwoB_GSTIN: twoBRow?.gstin || "",
     PR_SupplierName: prRow?.supplierName || "",
@@ -503,7 +518,6 @@ function buildBusinessExportRow(baseRow, remark) {
     CGST: baseRow?.cgst ?? "",
     SGST: baseRow?.sgst ?? "",
     CESS: baseRow?.computedCESS ?? 0,
-    ComputedTotalTax: baseRow?.computedTotalTax ?? baseRow?.totalTax ?? "",
     Remark: remark,
   };
 }
@@ -533,7 +547,7 @@ function renderTable() {
     return;
   }
 
-  const columns = Object.keys(rows[0]);
+  const columns = Object.keys(rows[0]).filter((col) => !EXCLUDED_RESULT_COLUMNS.has(col));
   const thead = `<thead><tr>${columns.map((col) => `<th class="${getColumnClass(col, true)}">${escapeHtml(col)}</th>`).join("")}</tr></thead>`;
 
   let bodyHtml = "";
@@ -606,22 +620,99 @@ function getRemarkClass(remark) {
     .replace(/^-|-$/g, "")}`;
 }
 
-function exportResults() {
-  const prRows = state.results.PurchaseRegisterExport;
-  const twoBRows = state.results.GSTR2BExport;
+function exportDataset(type) {
+  const sourceRows = type === "PR" ? state.results.PurchaseRegisterExport : state.results.GSTR2BExport;
+  const rows = sourceRows.map((row) => formatExportRow(row));
+  const sheet = XLSX.utils.json_to_sheet(rows.length ? rows : [createEmptyExportRow()], { header: EXPORT_COLUMNS });
+  applyWorksheetTemplate(sheet, rows.length + 1);
 
   const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(prRows.length ? prRows : [{ Info: "No records found" }]), "PR_with_Remarks");
-  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(twoBRows.length ? twoBRows : [{ Info: "No records found" }]), "2B_with_Remarks");
-  XLSX.utils.book_append_sheet(
-    workbook,
-    XLSX.utils.json_to_sheet(state.results["Party Summary"].length ? state.results["Party Summary"] : [{ Info: "No records found" }]),
-    "Party_Summary"
-  );
-  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(buildSummaryRows()), "Summary");
-  XLSX.writeFile(workbook, "ITC_Reco_Output.xlsx");
+  const tabName = `${type}_${state.activeTab.replace(/\s+/g, "_")}`;
+  XLSX.utils.book_append_sheet(workbook, sheet, tabName.slice(0, 31));
+  XLSX.writeFile(workbook, `${tabName}_${getTodayStamp()}.xlsx`);
 }
 
+function formatExportRow(row) {
+  return {
+    GSTIN: row.GSTIN || "",
+    SupplierName: row.SupplierName || "",
+    InvoiceNo: row.InvoiceNo || "",
+    InvoiceDate: row.InvoiceDate || "",
+    TaxableValue: row.TaxableValue ?? "",
+    IGST: row.IGST ?? "",
+    CGST: row.CGST ?? "",
+    SGST: row.SGST ?? "",
+    CESS: row.CESS ?? 0,
+    Remark: sanitizeRemark(row.Remark),
+  };
+}
+
+function createEmptyExportRow() {
+  return EXPORT_COLUMNS.reduce((acc, col) => {
+    acc[col] = col === "CESS" ? 0 : "";
+    return acc;
+  }, {});
+}
+
+function sanitizeRemark(remark) {
+  const allowed = new Set(Object.values(REMARKS));
+  return allowed.has(remark) ? remark : "";
+}
+
+function getTodayStamp() {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function applyWorksheetTemplate(sheet, rowCount) {
+  sheet["!autofilter"] = { ref: `A1:J1` };
+  sheet["!freeze"] = { xSplit: 0, ySplit: 1, topLeftCell: "A2", activePane: "bottomLeft", state: "frozen" };
+  sheet["!cols"] = [
+    { wch: 16 },
+    { wch: 32 },
+    { wch: 18 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 18 },
+  ];
+
+  const headerStyle = {
+    font: { bold: true, color: { rgb: "1F2937" } },
+    fill: { fgColor: { rgb: "E5E7EB" } },
+    alignment: { horizontal: "center", vertical: "center" },
+  };
+
+  for (let c = 0; c < EXPORT_COLUMNS.length; c += 1) {
+    const cell = XLSX.utils.encode_cell({ r: 0, c });
+    if (sheet[cell]) sheet[cell].s = headerStyle;
+  }
+
+  for (let r = 1; r < rowCount; r += 1) {
+    [4, 5, 6, 7, 8].forEach((c) => {
+      const ref = XLSX.utils.encode_cell({ r, c });
+      if (sheet[ref]) sheet[ref].s = { alignment: { horizontal: "right", vertical: "center" } };
+    });
+    const dateRef = XLSX.utils.encode_cell({ r, c: 3 });
+    if (sheet[dateRef]) sheet[dateRef].s = { alignment: { horizontal: "center", vertical: "center" } };
+
+    const remarkRef = XLSX.utils.encode_cell({ r, c: 9 });
+    if (sheet[remarkRef]) sheet[remarkRef].s = { fill: { fgColor: { rgb: getRemarkFill(sheet[remarkRef].v) } }, alignment: { horizontal: "center", vertical: "center" } };
+  }
+}
+
+function getRemarkFill(remark) {
+  if (remark === REMARKS.MATCHED) return "DCFCE7";
+  if (remark === REMARKS.NOT_IN_2B || remark === REMARKS.NOT_IN_PR) return "FEE2E2";
+  if (remark === REMARKS.VALUE_DIFFERENCE) return "FEF3C7";
+  return "FFFFFF";
+}
 
 function compareBusinessExportRows(a, b) {
   const supplierA = normalizeSupplierName(a.SupplierName);
@@ -633,19 +724,6 @@ function compareBusinessExportRows(a, b) {
   const dateB = normalizeText(b.InvoiceDate || "9999-99-99");
   if (dateA !== dateB) return dateA.localeCompare(dateB);
   return normalizeInvoiceNo(a.InvoiceNo).localeCompare(normalizeInvoiceNo(b.InvoiceNo));
-}
-
-function buildSummaryRows() {
-  return [
-    { Metric: "Total Books Invoices", Value: document.getElementById("totalBooks").textContent },
-    { Metric: "Total 2B Invoices", Value: document.getElementById("total2b").textContent },
-    { Metric: "Matched", Value: document.getElementById("matchedCount").textContent },
-    { Metric: "Not in 2B", Value: document.getElementById("missing2bCount").textContent },
-    { Metric: "Not in PR", Value: document.getElementById("missingBooksCount").textContent },
-    { Metric: "Value Difference", Value: document.getElementById("valueDiffCount").textContent },
-    { Metric: "Taxable Tolerance", Value: String(state.settings.taxableTolerance) },
-    { Metric: "Tax Tolerance", Value: String(state.settings.taxTolerance) },
-  ];
 }
 
 function normalizeDate(value) {
