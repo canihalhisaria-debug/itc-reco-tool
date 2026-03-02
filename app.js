@@ -36,10 +36,13 @@ const state = {
     "Value Difference": [],
     "Not in 2B": [],
     "Not in PR": [],
+    "Party Summary": [],
     PurchaseRegisterExport: [],
     GSTR2BExport: [],
   },
   activeTab: "Matched",
+  partySummarySearch: "",
+  onlyMismatchParties: false,
 };
 
 const file2bInput = document.getElementById("file2b");
@@ -54,6 +57,9 @@ const resultTable = document.getElementById("resultTable");
 const exportBtn = document.getElementById("exportBtn");
 const taxableToleranceInput = document.getElementById("taxableTolerance");
 const taxToleranceInput = document.getElementById("taxTolerance");
+const partySearchInput = document.getElementById("partySearch");
+const mismatchPartiesOnlyInput = document.getElementById("onlyMismatchParties");
+const partyFilters = document.getElementById("partySummaryFilters");
 
 file2bInput.addEventListener("change", (e) => handleFile(e.target.files[0], "2b"));
 fileBooksInput.addEventListener("change", (e) => handleFile(e.target.files[0], "books"));
@@ -63,6 +69,16 @@ exportBtn.addEventListener("click", exportResults);
 [taxableToleranceInput, taxToleranceInput].forEach((input) => {
   input.addEventListener("change", syncSettingsFromUi);
   input.addEventListener("input", syncSettingsFromUi);
+});
+
+partySearchInput.addEventListener("input", () => {
+  state.partySummarySearch = normalizeText(partySearchInput.value).toLowerCase();
+  if (state.activeTab === "Party Summary") renderTable();
+});
+
+mismatchPartiesOnlyInput.addEventListener("change", () => {
+  state.onlyMismatchParties = mismatchPartiesOnlyInput.checked;
+  if (state.activeTab === "Party Summary") renderTable();
 });
 
 syncSettingsToUi();
@@ -128,9 +144,9 @@ function hasBaseGstSource(mapping) {
 }
 
 function hasMinimumMapping(mapping) {
-  const hasInvoiceNo = Boolean(mapping["Invoice No"]);
-  const hasAmountMode = Boolean(mapping["Taxable Value"]) && hasBaseGstSource(mapping);
-  return hasInvoiceNo || hasAmountMode;
+  const hasTaxable = Boolean(mapping["Taxable Value"]);
+  const hasTaxComponents = hasBaseGstSource(mapping) || Boolean(mapping["Total Tax"]);
+  return hasTaxable && hasTaxComponents;
 }
 
 function updateReconcileButtonState() {
@@ -158,12 +174,9 @@ function normalizeRow(row, mapping, sourceIndex) {
   const igst = roundTo2(toNumber(getMapped(row, mapping, "IGST")));
   const cgst = roundTo2(toNumber(getMapped(row, mapping, "CGST")));
   const sgst = roundTo2(toNumber(getMapped(row, mapping, "SGST")));
-  const cess = mapping.CESS ? roundTo2(toNumber(getMapped(row, mapping, "CESS"))) : null;
+  const cess = mapping.CESS ? roundTo2(toNumber(getMapped(row, mapping, "CESS"))) : 0;
   const totalTaxMapped = roundTo2(toNumber(getMapped(row, mapping, "Total Tax")));
-
-  const baseGST = roundTo2(igst + cgst + sgst);
-  const totalTaxBase = mapping["Total Tax"] ? totalTaxMapped : baseGST;
-  const totalTax = roundTo2(totalTaxBase + (cess ?? 0));
+  const totalTax = computeTotalTax({ igst, cgst, sgst, cess, totalTaxMapped, hasTotalTaxColumn: Boolean(mapping["Total Tax"]) });
   const dateSource = getMapped(row, mapping, "Invoice Date");
   const invoiceDate = normalizeDate(dateSource);
 
@@ -182,9 +195,10 @@ function normalizeRow(row, mapping, sourceIndex) {
     igst,
     cgst,
     sgst,
-    baseGST,
     cess,
+    computedCESS: cess,
     totalTax,
+    computedTotalTax: totalTax,
     used: false,
   };
 
@@ -198,24 +212,24 @@ function getMapped(row, mapping, key) {
 
 function diffSummary(prRow, twoBRow) {
   const taxableDiff = roundTo2(prRow.taxableValue - twoBRow.taxableValue);
-  const gstDiff = roundTo2(prRow.baseGST - twoBRow.baseGST);
-  const cessComparable = prRow.cess !== null && twoBRow.cess !== null;
-  const cessDiff = cessComparable ? roundTo2(prRow.cess - twoBRow.cess) : "";
+  const taxDiff = roundTo2(prRow.totalTax - twoBRow.totalTax);
+  const cessDiff = roundTo2(prRow.cess - twoBRow.cess);
+  const cessComparable = Boolean(state.mapped2b.CESS) && Boolean(state.mappedBooks.CESS);
   const taxableTolerance = roundTo2(state.settings.taxableTolerance);
   const taxTolerance = roundTo2(state.settings.taxTolerance);
   const taxableWithin = isWithinTolerance(taxableDiff, taxableTolerance);
-  const gstWithin = isWithinTolerance(gstDiff, taxTolerance);
+  const taxWithin = isWithinTolerance(taxDiff, taxTolerance);
   const cessWithin = cessComparable ? isWithinTolerance(cessDiff, taxTolerance) : true;
-  const withinTolerance = taxableWithin && gstWithin && cessWithin;
-  const combinedDiff = roundTo2(Math.abs(taxableDiff) + Math.abs(gstDiff) + (cessComparable ? Math.abs(cessDiff) : 0));
+  const withinTolerance = taxableWithin && taxWithin && cessWithin;
+  const combinedDiff = roundTo2(Math.abs(taxableDiff) + Math.abs(taxDiff) + (cessComparable ? Math.abs(cessDiff) : 0));
 
   return {
     taxableDiff,
-    gstDiff,
+    taxDiff,
     cessDiff,
     cessComparable,
     taxableWithin,
-    gstWithin,
+    taxWithin,
     cessWithin,
     withinTolerance,
     combinedDiff,
@@ -246,7 +260,7 @@ function getInvoiceMatches(prRow, twoBRows) {
 }
 
 function getAmountBasedMatches(prRow, twoBRows) {
-  return twoBRows.filter((row) => !row.used);
+  return twoBRows.filter((row) => !row.used && !row.hasStrongInvoiceMatch);
 }
 
 function datesMatchWhenPresent(prRow, twoBRow) {
@@ -261,6 +275,7 @@ function reconcile() {
 
   const prRows = state.rawBooks.map((row, idx) => normalizeRow(row, state.mappedBooks, idx));
   const twoBRows = state.raw2b.map((row, idx) => normalizeRow(row, state.mapped2b, idx));
+  markStrongInvoiceRows(prRows, twoBRows);
 
   const matched = [];
   const valueDifference = [];
@@ -285,21 +300,21 @@ function reconcile() {
         invoiceToleranceMatch.row,
         REMARKS.MATCHED,
         invoiceToleranceMatch.taxableDiff,
-        invoiceToleranceMatch.gstDiff,
+        invoiceToleranceMatch.taxDiff,
         invoiceToleranceMatch.cessDiff,
         mode,
         reason
       );
       matched.push(outcome);
       prExportRows.push(
-        buildPrExportRow(prRow, invoiceToleranceMatch.row, REMARKS.MATCHED, invoiceToleranceMatch.taxableDiff, invoiceToleranceMatch.gstDiff, invoiceToleranceMatch.cessDiff, mode, reason)
+        buildPrExportRow(prRow, invoiceToleranceMatch.row, REMARKS.MATCHED, invoiceToleranceMatch.taxableDiff, invoiceToleranceMatch.taxDiff, invoiceToleranceMatch.cessDiff, mode, reason)
       );
       twoBExportRows[invoiceToleranceMatch.row.sourceIndex] = build2BExportRow(
         invoiceToleranceMatch.row,
         prRow,
         REMARKS.MATCHED,
         invoiceToleranceMatch.taxableDiff,
-        invoiceToleranceMatch.gstDiff,
+        invoiceToleranceMatch.taxDiff,
         invoiceToleranceMatch.cessDiff,
         mode,
         reason
@@ -318,21 +333,21 @@ function reconcile() {
         amountToleranceMatch.row,
         REMARKS.MATCHED,
         amountToleranceMatch.taxableDiff,
-        amountToleranceMatch.gstDiff,
+        amountToleranceMatch.taxDiff,
         amountToleranceMatch.cessDiff,
         mode,
         reason
       );
       matched.push(outcome);
       prExportRows.push(
-        buildPrExportRow(prRow, amountToleranceMatch.row, REMARKS.MATCHED, amountToleranceMatch.taxableDiff, amountToleranceMatch.gstDiff, amountToleranceMatch.cessDiff, mode, reason)
+        buildPrExportRow(prRow, amountToleranceMatch.row, REMARKS.MATCHED, amountToleranceMatch.taxableDiff, amountToleranceMatch.taxDiff, amountToleranceMatch.cessDiff, mode, reason)
       );
       twoBExportRows[amountToleranceMatch.row.sourceIndex] = build2BExportRow(
         amountToleranceMatch.row,
         prRow,
         REMARKS.MATCHED,
         amountToleranceMatch.taxableDiff,
-        amountToleranceMatch.gstDiff,
+        amountToleranceMatch.taxDiff,
         amountToleranceMatch.cessDiff,
         mode,
         reason
@@ -353,13 +368,14 @@ function reconcile() {
     prRow.used = true;
     closest.row.used = true;
     const mode = invoiceMatches.length ? "InvoiceOnly" : "AmountBased";
-    const remark = closest.withinTolerance ? REMARKS.MATCHED : REMARKS.VALUE_DIFFERENCE;
-    const reason = closest.withinTolerance ? buildMatchReason(mode, prRow, closest.row) : buildDiffReason(prRow, closest.row, closest, mode);
+    const toleranceResult = diffSummary(prRow, closest.row);
+    const remark = toleranceResult.withinTolerance ? REMARKS.MATCHED : REMARKS.VALUE_DIFFERENCE;
+    const reason = toleranceResult.withinTolerance ? buildMatchReason(mode, prRow, closest.row) : buildDiffReason(prRow, closest.row, toleranceResult, mode);
     const bucket = remark === REMARKS.MATCHED ? matched : valueDifference;
 
-    bucket.push(buildOutcomeRow(prRow, closest.row, remark, closest.taxableDiff, closest.gstDiff, closest.cessDiff, mode, reason));
-    prExportRows.push(buildPrExportRow(prRow, closest.row, remark, closest.taxableDiff, closest.gstDiff, closest.cessDiff, mode, reason));
-    twoBExportRows[closest.row.sourceIndex] = build2BExportRow(closest.row, prRow, remark, closest.taxableDiff, closest.gstDiff, closest.cessDiff, mode, reason);
+    bucket.push(buildOutcomeRow(prRow, closest.row, remark, toleranceResult.taxableDiff, toleranceResult.taxDiff, toleranceResult.cessDiff, mode, reason));
+    prExportRows.push(buildPrExportRow(prRow, closest.row, remark, toleranceResult.taxableDiff, toleranceResult.taxDiff, toleranceResult.cessDiff, mode, reason));
+    twoBExportRows[closest.row.sourceIndex] = build2BExportRow(closest.row, prRow, remark, toleranceResult.taxableDiff, toleranceResult.taxDiff, toleranceResult.cessDiff, mode, reason);
   });
 
   twoBRows.forEach((twoBRow) => {
@@ -374,6 +390,7 @@ function reconcile() {
     "Value Difference": valueDifference,
     "Not in 2B": notIn2B,
     "Not in PR": notInPR,
+    "Party Summary": buildPartySummaryRows(matched, valueDifference, notIn2B, notInPR),
     PurchaseRegisterExport: prExportRows,
     GSTR2BExport: twoBExportRows.filter(Boolean),
   };
@@ -392,7 +409,7 @@ function reconcile() {
 }
 
 function buildMatchReason(mode, prRow, twoBRow) {
-  const reasons = ["Matched within taxable/base GST tolerance"];
+  const reasons = ["Matched within taxable/total tax tolerance"];
   if (mode === "AmountBased" && prRow.invoiceNoNorm !== twoBRow.invoiceNoNorm) {
     reasons.push("invoice mismatch accepted in AmountBased fallback");
   }
@@ -406,7 +423,7 @@ function buildMatchReason(mode, prRow, twoBRow) {
 function buildDiffReason(prRow, twoBRow, diff, mode) {
   const reasons = [];
   if (!diff.taxableWithin) reasons.push(`taxable diff ${Math.abs(diff.taxableDiff).toFixed(2)} > tolerance`);
-  if (!diff.gstWithin) reasons.push(`GST diff ${Math.abs(diff.gstDiff).toFixed(2)} > tolerance`);
+  if (!diff.taxWithin) reasons.push(`Total tax diff ${Math.abs(diff.taxDiff).toFixed(2)} > tolerance`);
   if (diff.cessComparable && !diff.cessWithin) reasons.push(`CESS diff ${Math.abs(diff.cessDiff).toFixed(2)} > tolerance`);
   if (prRow.invoiceNoNorm !== twoBRow.invoiceNoNorm) reasons.push("invoice mismatch");
   if (prRow.gstin && twoBRow.gstin && prRow.gstin !== twoBRow.gstin) reasons.push("GSTIN mismatch");
@@ -443,10 +460,10 @@ function buildOutcomeRow(prRow, twoBRow, remark, taxableDiff = "", gstDiff = "",
     TwoB_TaxableValue: twoBRow?.taxableValue ?? "",
     PR_TotalTax: prRow?.totalTax ?? "",
     TwoB_TotalTax: twoBRow?.totalTax ?? "",
-    PR_CESS: prRow?.cess ?? "",
-    TwoB_CESS: twoBRow?.cess ?? "",
+    PR_CESS: prRow?.computedCESS ?? 0,
+    TwoB_CESS: twoBRow?.computedCESS ?? 0,
     TaxableDiff: taxableDiff,
-    GSTDiff: gstDiff,
+    TaxDiff: gstDiff,
     CessDiff: cessDiff,
   };
 }
@@ -459,12 +476,12 @@ function buildPrExportRow(prRow, twoBRow, remark, taxableDiff = "", gstDiff = ""
     GSTINMismatch: Boolean(prRow?.gstin && twoBRow?.gstin && prRow.gstin !== twoBRow.gstin),
     Reason: reason,
     MatchedSideTaxable: twoBRow?.taxableValue ?? "",
-    MatchedSideBaseGST: twoBRow?.baseGST ?? "",
-    MatchedSideCESS: twoBRow?.cess ?? "",
-    BaseGST: prRow.baseGST,
-    TotalTax: prRow.totalTax,
+    MatchedSideTotalTax: twoBRow?.totalTax ?? "",
+    MatchedSideCESS: twoBRow?.computedCESS ?? 0,
+    ComputedTotalTax: prRow.totalTax,
+    ComputedCESS: prRow.computedCESS,
     TaxableDiff: taxableDiff,
-    GSTDiff: gstDiff,
+    TaxDiff: gstDiff,
     CessDiff: cessDiff,
   };
 }
@@ -477,18 +494,18 @@ function build2BExportRow(twoBRow, prRow, remark, taxableDiff = "", gstDiff = ""
     GSTINMismatch: Boolean(prRow?.gstin && twoBRow?.gstin && prRow.gstin !== twoBRow.gstin),
     Reason: reason,
     MatchedSideTaxable: prRow?.taxableValue ?? "",
-    MatchedSideBaseGST: prRow?.baseGST ?? "",
-    MatchedSideCESS: prRow?.cess ?? "",
-    BaseGST: twoBRow.baseGST,
-    TotalTax: twoBRow.totalTax,
+    MatchedSideTotalTax: prRow?.totalTax ?? "",
+    MatchedSideCESS: prRow?.computedCESS ?? 0,
+    ComputedTotalTax: twoBRow.totalTax,
+    ComputedCESS: twoBRow.computedCESS,
     TaxableDiff: taxableDiff,
-    GSTDiff: gstDiff,
+    TaxDiff: gstDiff,
     CessDiff: cessDiff,
   };
 }
 
 function renderTabs() {
-  const tabs = ["Matched", "Value Difference", "Not in 2B", "Not in PR"];
+  const tabs = ["Matched", "Value Difference", "Not in 2B", "Not in PR", "Party Summary"];
   tabButtons.innerHTML = "";
 
   tabs.forEach((tab) => {
@@ -505,7 +522,8 @@ function renderTabs() {
 }
 
 function renderTable() {
-  const rows = state.results[state.activeTab] || [];
+  const rows = getActiveRows();
+  partyFilters.hidden = state.activeTab !== "Party Summary";
   if (!rows.length) {
     resultTable.innerHTML = "<tr><td>No records found.</td></tr>";
     return;
@@ -519,7 +537,7 @@ function renderTable() {
         .map((col) => {
           if (col === "Remark") {
             const tooltip = row.MatchMode
-              ? `Mode: ${formatCell(row.MatchMode)} | TaxableDiff: ${formatCell(row.TaxableDiff)} | GSTDiff: ${formatCell(row.GSTDiff)} | CessDiff: ${formatCell(row.CessDiff)}`
+              ? `Mode: ${formatCell(row.MatchMode)} | TaxableDiff: ${formatCell(row.TaxableDiff)} | TaxDiff: ${formatCell(row.TaxDiff)} | CessDiff: ${formatCell(row.CessDiff)}`
               : "";
             const debugBadge = tooltip ? `<span class="debug-tip" title="${escapeHtml(tooltip)}">ⓘ</span>` : "";
             return `<td><span class="remark-badge ${getRemarkClass(row.Remark)}">${escapeHtml(formatCell(row[col]))}</span>${debugBadge}</td>`;
@@ -548,6 +566,11 @@ function exportResults() {
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(prRows.length ? prRows : [{ Info: "No records found" }]), "PR_with_Remarks");
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(twoBRows.length ? twoBRows : [{ Info: "No records found" }]), "2B_with_Remarks");
+  XLSX.utils.book_append_sheet(
+    workbook,
+    XLSX.utils.json_to_sheet(state.results["Party Summary"].length ? state.results["Party Summary"] : [{ Info: "No records found" }]),
+    "Party_Summary"
+  );
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(buildSummaryRows()), "Summary");
   XLSX.writeFile(workbook, "ITC_Reco_Output.xlsx");
 }
@@ -592,7 +615,11 @@ function normalizeDate(value) {
 function normalizeInvoiceNo(value) {
   return normalizeText(value)
     .toUpperCase()
-    .replace(/[^A-Z0-9]/g, "");
+    .replace(/[\\/_]+/g, "-")
+    .replace(/\s*[-.]+\s*/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/[^A-Z0-9-]/g, "")
+    .replace(/^-|-$/g, "");
 }
 
 function normalizeText(value) {
@@ -615,10 +642,117 @@ function formatCell(value) {
 }
 
 function toNumber(value) {
-  const text = normalizeText(value).replace(/,/g, "");
+  const text = normalizeText(value)
+    .replace(/,/g, "")
+    .replace(/^\((.*)\)$/, "-$1");
   if (!text || text === "-") return 0;
   const n = parseFloat(text);
   return Number.isFinite(n) ? n : 0;
+}
+
+function computeTotalTax(row) {
+  const igst = toNumber(row.igst);
+  const cgst = toNumber(row.cgst);
+  const sgst = toNumber(row.sgst);
+  const cess = toNumber(row.cess);
+  const componentSum = roundTo2(igst + cgst + sgst + cess);
+  if (row.hasTotalTaxColumn) {
+    const totalTaxMapped = toNumber(row.totalTaxMapped);
+    if (Math.abs(totalTaxMapped - componentSum) <= 0.01) return componentSum;
+  }
+  return componentSum;
+}
+
+function markStrongInvoiceRows(prRows, twoBRows) {
+  const prSet = new Set(prRows.filter((row) => row.invoiceNoNorm).map((row) => row.invoiceNoNorm));
+  const b2Set = new Set(twoBRows.filter((row) => row.invoiceNoNorm).map((row) => row.invoiceNoNorm));
+  prRows.forEach((row) => {
+    row.hasStrongInvoiceMatch = Boolean(row.invoiceNoNorm && b2Set.has(row.invoiceNoNorm));
+  });
+  twoBRows.forEach((row) => {
+    row.hasStrongInvoiceMatch = Boolean(row.invoiceNoNorm && prSet.has(row.invoiceNoNorm));
+  });
+}
+
+function getActiveRows() {
+  if (state.activeTab !== "Party Summary") return state.results[state.activeTab] || [];
+  return state.results["Party Summary"].filter((row) => {
+    const matchesSearch = !state.partySummarySearch || String(row.PartyKey).toLowerCase().includes(state.partySummarySearch);
+    const mismatchTotal =
+      Math.abs(row.NotInPR_Taxable) +
+      Math.abs(row.NotIn2B_Taxable) +
+      Math.abs(row.ValueDiffImpact_Taxable) +
+      Math.abs(row.NotInPR_TotalTax) +
+      Math.abs(row.NotIn2B_TotalTax) +
+      Math.abs(row.ValueDiffImpact_TotalTax);
+    return matchesSearch && (!state.onlyMismatchParties || mismatchTotal > 0);
+  });
+}
+
+function buildPartySummaryRows(matchedRows, valueDiffRows, notIn2BRows, notInPRRows) {
+  const partyMap = new Map();
+  const ensure = (row) => {
+    const gstin = row.TwoB_GSTIN || row.PR_GSTIN || "";
+    const supplier = row.TwoB_SupplierName || row.PR_SupplierName || "Unknown Supplier";
+    const partyKey = gstin || supplier;
+    if (!partyMap.has(partyKey)) {
+      partyMap.set(partyKey, {
+        PartyKey: partyKey,
+        GSTIN: gstin,
+        SupplierName: supplier,
+        AsPer2B_Taxable: 0,
+        AsPer2B_TotalTax: 0,
+        AsPer2B_CESS: 0,
+        NotInPR_Taxable: 0,
+        NotInPR_TotalTax: 0,
+        NotInPR_CESS: 0,
+        NotIn2B_Taxable: 0,
+        NotIn2B_TotalTax: 0,
+        NotIn2B_CESS: 0,
+        ValueDiffImpact_Taxable: 0,
+        ValueDiffImpact_TotalTax: 0,
+        ValueDiffImpact_CESS: 0,
+      });
+    }
+    return partyMap.get(partyKey);
+  };
+
+  [...matchedRows, ...valueDiffRows, ...notInPRRows].forEach((row) => {
+    const party = ensure(row);
+    party.AsPer2B_Taxable = roundTo2(party.AsPer2B_Taxable + toNumber(row.TwoB_TaxableValue));
+    party.AsPer2B_TotalTax = roundTo2(party.AsPer2B_TotalTax + toNumber(row.TwoB_TotalTax));
+    party.AsPer2B_CESS = roundTo2(party.AsPer2B_CESS + toNumber(row.TwoB_CESS));
+  });
+
+  notInPRRows.forEach((row) => {
+    const party = ensure(row);
+    party.NotInPR_Taxable = roundTo2(party.NotInPR_Taxable + toNumber(row.TwoB_TaxableValue));
+    party.NotInPR_TotalTax = roundTo2(party.NotInPR_TotalTax + toNumber(row.TwoB_TotalTax));
+    party.NotInPR_CESS = roundTo2(party.NotInPR_CESS + toNumber(row.TwoB_CESS));
+  });
+
+  notIn2BRows.forEach((row) => {
+    const party = ensure(row);
+    party.NotIn2B_Taxable = roundTo2(party.NotIn2B_Taxable + toNumber(row.PR_TaxableValue));
+    party.NotIn2B_TotalTax = roundTo2(party.NotIn2B_TotalTax + toNumber(row.PR_TotalTax));
+    party.NotIn2B_CESS = roundTo2(party.NotIn2B_CESS + toNumber(row.PR_CESS));
+  });
+
+  valueDiffRows.forEach((row) => {
+    const party = ensure(row);
+    party.ValueDiffImpact_Taxable = roundTo2(party.ValueDiffImpact_Taxable + toNumber(row.TaxableDiff));
+    party.ValueDiffImpact_TotalTax = roundTo2(party.ValueDiffImpact_TotalTax + toNumber(row.TaxDiff));
+    party.ValueDiffImpact_CESS = roundTo2(party.ValueDiffImpact_CESS + toNumber(row.CessDiff));
+  });
+
+  return Array.from(partyMap.values())
+    .map((party) => ({
+      ...party,
+      DerivedPR_Taxable: roundTo2(party.AsPer2B_Taxable - party.NotInPR_Taxable + party.NotIn2B_Taxable + party.ValueDiffImpact_Taxable),
+      DerivedPR_TotalTax: roundTo2(party.AsPer2B_TotalTax - party.NotInPR_TotalTax + party.NotIn2B_TotalTax + party.ValueDiffImpact_TotalTax),
+      DerivedPR_CESS: roundTo2(party.AsPer2B_CESS - party.NotInPR_CESS + party.NotIn2B_CESS + party.ValueDiffImpact_CESS),
+    }))
+    .sort((a, b) => a.SupplierName.localeCompare(b.SupplierName));
 }
 
 function roundTo2(value) {

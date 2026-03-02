@@ -40,7 +40,7 @@
 
     <section class="card" id="mappingSection">
       <h2>2) Column Mapping</h2>
-      <p class="muted">Minimum required mapping: Invoice No OR (Taxable Value + any base GST component: IGST/CGST/SGST). GSTIN, Supplier Name, Invoice Date, and CESS are optional.</p>
+      <p class="muted">Minimum required mapping: Taxable Value + at least one tax source (IGST/CGST/SGST or Total Tax). GSTIN, Supplier Name, Invoice No, Invoice Date, and CESS are optional.</p>
       <div class="mapping-grid">
         <div>
           <h3>GSTR-2B Mapping</h3>
@@ -82,8 +82,18 @@
     <section class="card" id="resultsSection">
       <h2>4) Results</h2>
       <div class="tabs" id="tabButtons"></div>
+      <div class="party-filters" id="partySummaryFilters" hidden>
+        <label class="field">
+          <span>Search party (GSTIN/Supplier)</span>
+          <input type="text" id="partySearch" placeholder="Type GSTIN or supplier name" />
+        </label>
+        <label class="checkbox-row">
+          <input type="checkbox" id="onlyMismatchParties" />
+          <span>Only mismatch parties</span>
+        </label>
+      </div>
       <div class="tab-toolbar">
-        <button id="exportBtn" disabled>Download Excel (PR + 2B)</button>
+        <button id="exportBtn" disabled>Download Excel (PR + 2B + Party Summary)</button>
       </div>
       <div class="table-wrap">
         <table id="resultTable"></table>
