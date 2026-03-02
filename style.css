@@ -20,7 +20,7 @@
 body {
   margin: 0;
   font-family: "Inter", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  font-size: 15px;
+  font-size: 16px;
   background: linear-gradient(180deg, #f8fbff 0%, var(--bg) 100%);
   color: var(--text);
   line-height: 1.5;
@@ -233,6 +233,32 @@ button:disabled {
   margin-top: 12px;
 }
 
+.party-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 10px;
+}
+
+.party-filters .field {
+  flex: 1 1 300px;
+}
+
+.checkbox-row {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  min-height: 42px;
+  color: #334155;
+  font-weight: 500;
+}
+
+.checkbox-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+
 .summary-grid {
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
   margin-bottom: 16px;
@@ -325,7 +351,7 @@ td {
   text-align: left;
   padding: 12px;
   border-bottom: 1px solid #e9edf5;
-  font-size: 0.86rem;
+  font-size: 0.92rem;
   white-space: nowrap;
 }
 
