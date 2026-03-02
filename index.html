@@ -82,6 +82,16 @@
     <section class="card" id="resultsSection">
       <h2>4) Results</h2>
       <div class="tabs" id="tabButtons"></div>
+      <div class="results-controls">
+        <label class="field">
+          <span>Quick search (Supplier/GSTIN/Invoice No)</span>
+          <input type="text" id="resultSearch" placeholder="Search supplier, GSTIN, or invoice no" />
+        </label>
+        <label class="checkbox-row group-toggle-row">
+          <input type="checkbox" id="groupByPartyToggle" checked />
+          <span>Group by Party</span>
+        </label>
+      </div>
       <div class="party-filters" id="partySummaryFilters" hidden>
         <label class="field">
           <span>Search party (GSTIN/Supplier)</span>

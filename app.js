@@ -43,6 +43,8 @@ const state = {
   activeTab: "Matched",
   partySummarySearch: "",
   onlyMismatchParties: false,
+  resultSearch: "",
+  groupByParty: true,
 };
 
 const file2bInput = document.getElementById("file2b");
@@ -60,6 +62,8 @@ const taxToleranceInput = document.getElementById("taxTolerance");
 const partySearchInput = document.getElementById("partySearch");
 const mismatchPartiesOnlyInput = document.getElementById("onlyMismatchParties");
 const partyFilters = document.getElementById("partySummaryFilters");
+const resultSearchInput = document.getElementById("resultSearch");
+const groupByPartyToggle = document.getElementById("groupByPartyToggle");
 
 file2bInput.addEventListener("change", (e) => handleFile(e.target.files[0], "2b"));
 fileBooksInput.addEventListener("change", (e) => handleFile(e.target.files[0], "books"));
@@ -79,6 +83,16 @@ partySearchInput.addEventListener("input", () => {
 mismatchPartiesOnlyInput.addEventListener("change", () => {
   state.onlyMismatchParties = mismatchPartiesOnlyInput.checked;
   if (state.activeTab === "Party Summary") renderTable();
+});
+
+resultSearchInput.addEventListener("input", () => {
+  state.resultSearch = normalizeText(resultSearchInput.value).toLowerCase();
+  renderTable();
+});
+
+groupByPartyToggle.addEventListener("change", () => {
+  state.groupByParty = groupByPartyToggle.checked;
+  renderTable();
 });
 
 syncSettingsToUi();
@@ -391,8 +405,8 @@ function reconcile() {
     "Not in 2B": notIn2B,
     "Not in PR": notInPR,
     "Party Summary": buildPartySummaryRows(matched, valueDifference, notIn2B, notInPR),
-    PurchaseRegisterExport: prExportRows,
-    GSTR2BExport: twoBExportRows.filter(Boolean),
+    PurchaseRegisterExport: prExportRows.sort(compareBusinessExportRows),
+    GSTR2BExport: twoBExportRows.filter(Boolean).sort(compareBusinessExportRows),
   };
 
   document.getElementById("totalBooks").textContent = String(prRows.length);
@@ -468,39 +482,29 @@ function buildOutcomeRow(prRow, twoBRow, remark, taxableDiff = "", gstDiff = "",
   };
 }
 
-function buildPrExportRow(prRow, twoBRow, remark, taxableDiff = "", gstDiff = "", cessDiff = "", mode = "", reason = "") {
-  return {
-    ...prRow.original,
-    Remark: remark,
-    MatchMode: mode,
-    GSTINMismatch: Boolean(prRow?.gstin && twoBRow?.gstin && prRow.gstin !== twoBRow.gstin),
-    Reason: reason,
-    MatchedSideTaxable: twoBRow?.taxableValue ?? "",
-    MatchedSideTotalTax: twoBRow?.totalTax ?? "",
-    MatchedSideCESS: twoBRow?.computedCESS ?? 0,
-    ComputedTotalTax: prRow.totalTax,
-    ComputedCESS: prRow.computedCESS,
-    TaxableDiff: taxableDiff,
-    TaxDiff: gstDiff,
-    CessDiff: cessDiff,
-  };
+function buildPrExportRow(prRow, twoBRow, remark) {
+  const base = prRow || twoBRow;
+  return buildBusinessExportRow(base, remark);
 }
 
-function build2BExportRow(twoBRow, prRow, remark, taxableDiff = "", gstDiff = "", cessDiff = "", mode = "", reason = "") {
+function build2BExportRow(twoBRow, prRow, remark) {
+  const base = twoBRow || prRow;
+  return buildBusinessExportRow(base, remark);
+}
+
+function buildBusinessExportRow(baseRow, remark) {
   return {
-    ...twoBRow.original,
+    GSTIN: baseRow?.gstin || "",
+    SupplierName: baseRow?.supplierName || "",
+    InvoiceNo: baseRow?.invoiceNo || "",
+    InvoiceDate: baseRow?.invoiceDate || "",
+    TaxableValue: baseRow?.taxableValue ?? "",
+    IGST: baseRow?.igst ?? "",
+    CGST: baseRow?.cgst ?? "",
+    SGST: baseRow?.sgst ?? "",
+    CESS: baseRow?.computedCESS ?? 0,
+    ComputedTotalTax: baseRow?.computedTotalTax ?? baseRow?.totalTax ?? "",
     Remark: remark,
-    MatchMode: mode,
-    GSTINMismatch: Boolean(prRow?.gstin && twoBRow?.gstin && prRow.gstin !== twoBRow.gstin),
-    Reason: reason,
-    MatchedSideTaxable: prRow?.taxableValue ?? "",
-    MatchedSideTotalTax: prRow?.totalTax ?? "",
-    MatchedSideCESS: prRow?.computedCESS ?? 0,
-    ComputedTotalTax: twoBRow.totalTax,
-    ComputedCESS: twoBRow.computedCESS,
-    TaxableDiff: taxableDiff,
-    TaxDiff: gstDiff,
-    CessDiff: cessDiff,
   };
 }
 
@@ -530,25 +534,68 @@ function renderTable() {
   }
 
   const columns = Object.keys(rows[0]);
-  const thead = `<thead><tr>${columns.map((col) => `<th>${escapeHtml(col)}</th>`).join("")}</tr></thead>`;
-  const tbody = `<tbody>${rows
-    .map((row) => {
-      return `<tr>${columns
-        .map((col) => {
-          if (col === "Remark") {
-            const tooltip = row.MatchMode
-              ? `Mode: ${formatCell(row.MatchMode)} | TaxableDiff: ${formatCell(row.TaxableDiff)} | TaxDiff: ${formatCell(row.TaxDiff)} | CessDiff: ${formatCell(row.CessDiff)}`
-              : "";
-            const debugBadge = tooltip ? `<span class="debug-tip" title="${escapeHtml(tooltip)}">ⓘ</span>` : "";
-            return `<td><span class="remark-badge ${getRemarkClass(row.Remark)}">${escapeHtml(formatCell(row[col]))}</span>${debugBadge}</td>`;
-          }
-          return `<td>${escapeHtml(formatCell(row[col]))}</td>`;
-        })
-        .join("")}</tr>`;
-    })
-    .join("")}</tbody>`;
+  const thead = `<thead><tr>${columns.map((col) => `<th class="${getColumnClass(col, true)}">${escapeHtml(col)}</th>`).join("")}</tr></thead>`;
 
-  resultTable.innerHTML = thead + tbody;
+  let bodyHtml = "";
+  if (state.activeTab !== "Party Summary" && state.groupByParty) {
+    const groups = groupRowsByParty(rows);
+    bodyHtml = groups
+      .map((group) => {
+        const groupHeader = `<tr class="party-group-header"><td colspan="${columns.length}"><div class="party-group-head"><span class="party-id">${escapeHtml(group.partyLabel)}</span><span class="party-meta">Matched: ${group.counts.matched} | Not in 2B: ${group.counts.notIn2B} | Not in PR: ${group.counts.notInPR} | Value Difference: ${group.counts.valueDifference}</span><span class="party-totals">Taxable: ${group.totals.taxable.toFixed(2)} | Total Tax: ${group.totals.tax.toFixed(2)}</span></div></td></tr>`;
+        const rowsHtml = group.rows
+          .map((row) => `<tr>${columns.map((col) => renderCell(row, col)).join("")}</tr>`)
+          .join("");
+        return groupHeader + rowsHtml;
+      })
+      .join("");
+  } else {
+    bodyHtml = rows.map((row) => `<tr>${columns.map((col) => renderCell(row, col)).join("")}</tr>`).join("");
+  }
+
+  resultTable.innerHTML = thead + `<tbody>${bodyHtml}</tbody>`;
+}
+
+function renderCell(row, col) {
+  const className = getColumnClass(col, false);
+  if (col === "Remark") {
+    return `<td class="${className}"><span class="remark-badge ${getRemarkClass(row.Remark)}">${escapeHtml(formatCell(row[col]))}</span></td>`;
+  }
+  return `<td class="${className}">${escapeHtml(formatCell(row[col]))}</td>`;
+}
+
+function getColumnClass(col, isHeader) {
+  const lower = String(col).toLowerCase();
+  const classes = [];
+  if (lower.includes("date")) classes.push("col-date");
+  if (["taxablevalue", "igst", "cgst", "sgst", "cess", "computedtotaltax", "prtaxablevalue", "twobtaxablevalue", "prtotaltax", "twobtotaltax", "taxablediff", "taxdiff", "cessdiff"].includes(lower.replace(/[^a-z0-9]/g, ""))) classes.push("col-num");
+  if (lower.includes("supplier")) classes.push("col-supplier");
+  if (lower.includes("invoice") && lower.includes("no")) classes.push("col-invoice");
+  if (isHeader) classes.push("col-head");
+  return classes.join(" ");
+}
+
+function groupRowsByParty(rows) {
+  const grouped = new Map();
+  rows.forEach((row) => {
+    const key = getPartySortKeyFromDisplayRow(row);
+    if (!grouped.has(key.key)) {
+      grouped.set(key.key, {
+        partyLabel: `${key.supplier || "Unknown Supplier"} (${key.gstin || "No GSTIN"})`,
+        rows: [],
+        counts: { matched: 0, notIn2B: 0, notInPR: 0, valueDifference: 0 },
+        totals: { taxable: 0, tax: 0 },
+      });
+    }
+    const grp = grouped.get(key.key);
+    grp.rows.push(row);
+    if (row.Remark === REMARKS.MATCHED) grp.counts.matched += 1;
+    if (row.Remark === REMARKS.NOT_IN_2B) grp.counts.notIn2B += 1;
+    if (row.Remark === REMARKS.NOT_IN_PR) grp.counts.notInPR += 1;
+    if (row.Remark === REMARKS.VALUE_DIFFERENCE) grp.counts.valueDifference += 1;
+    grp.totals.taxable = roundTo2(grp.totals.taxable + getRowTaxable(row));
+    grp.totals.tax = roundTo2(grp.totals.tax + getRowTotalTax(row));
+  });
+  return Array.from(grouped.values());
 }
 
 function getRemarkClass(remark) {
@@ -573,6 +620,19 @@ function exportResults() {
   );
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(buildSummaryRows()), "Summary");
   XLSX.writeFile(workbook, "ITC_Reco_Output.xlsx");
+}
+
+
+function compareBusinessExportRows(a, b) {
+  const supplierA = normalizeSupplierName(a.SupplierName);
+  const supplierB = normalizeSupplierName(b.SupplierName);
+  const keyA = supplierA || normalizeText(a.GSTIN).toUpperCase();
+  const keyB = supplierB || normalizeText(b.GSTIN).toUpperCase();
+  if (keyA !== keyB) return keyA.localeCompare(keyB);
+  const dateA = normalizeText(a.InvoiceDate || "9999-99-99");
+  const dateB = normalizeText(b.InvoiceDate || "9999-99-99");
+  if (dateA !== dateB) return dateA.localeCompare(dateB);
+  return normalizeInvoiceNo(a.InvoiceNo).localeCompare(normalizeInvoiceNo(b.InvoiceNo));
 }
 
 function buildSummaryRows() {
@@ -675,18 +735,58 @@ function markStrongInvoiceRows(prRows, twoBRows) {
 }
 
 function getActiveRows() {
-  if (state.activeTab !== "Party Summary") return state.results[state.activeTab] || [];
-  return state.results["Party Summary"].filter((row) => {
-    const matchesSearch = !state.partySummarySearch || String(row.PartyKey).toLowerCase().includes(state.partySummarySearch);
-    const mismatchTotal =
-      Math.abs(row.NotInPR_Taxable) +
-      Math.abs(row.NotIn2B_Taxable) +
-      Math.abs(row.ValueDiffImpact_Taxable) +
-      Math.abs(row.NotInPR_TotalTax) +
-      Math.abs(row.NotIn2B_TotalTax) +
-      Math.abs(row.ValueDiffImpact_TotalTax);
-    return matchesSearch && (!state.onlyMismatchParties || mismatchTotal > 0);
+  if (state.activeTab === "Party Summary") {
+    return state.results["Party Summary"].filter((row) => {
+      const matchesSearch = !state.partySummarySearch || String(row.PartyKey).toLowerCase().includes(state.partySummarySearch);
+      const mismatchTotal =
+        Math.abs(row.NotInPR_Taxable) +
+        Math.abs(row.NotIn2B_Taxable) +
+        Math.abs(row.ValueDiffImpact_Taxable) +
+        Math.abs(row.NotInPR_TotalTax) +
+        Math.abs(row.NotIn2B_TotalTax) +
+        Math.abs(row.ValueDiffImpact_TotalTax);
+      return matchesSearch && (!state.onlyMismatchParties || mismatchTotal > 0);
+    });
+  }
+
+  const activeRows = (state.results[state.activeTab] || []).filter((row) => {
+    if (!state.resultSearch) return true;
+    const haystack = [row.PR_SupplierName, row.TwoB_SupplierName, row.PR_GSTIN, row.TwoB_GSTIN, row.PR_InvoiceNo, row.TwoB_InvoiceNo]
+      .map((v) => String(v || "").toLowerCase())
+      .join(" ");
+    return haystack.includes(state.resultSearch);
   });
+
+  return activeRows.sort(compareDisplayRows);
+}
+
+function getPartySortKeyFromDisplayRow(row) {
+  const supplier = normalizeText(row.PR_SupplierName || row.TwoB_SupplierName || "");
+  const gstin = normalizeText(row.PR_GSTIN || row.TwoB_GSTIN || "").toUpperCase();
+  const sortSupplier = normalizeSupplierName(supplier);
+  const sortKey = sortSupplier || gstin || "zzzz";
+  return { key: `${sortKey}|${gstin}`, supplier, gstin, sortKey };
+}
+
+function compareDisplayRows(a, b) {
+  const aParty = getPartySortKeyFromDisplayRow(a);
+  const bParty = getPartySortKeyFromDisplayRow(b);
+  if (aParty.sortKey !== bParty.sortKey) return aParty.sortKey.localeCompare(bParty.sortKey);
+  if (aParty.gstin !== bParty.gstin) return aParty.gstin.localeCompare(bParty.gstin);
+  const aDate = normalizeText(a.PR_InvoiceDate || a.TwoB_InvoiceDate || "9999-99-99");
+  const bDate = normalizeText(b.PR_InvoiceDate || b.TwoB_InvoiceDate || "9999-99-99");
+  if (aDate !== bDate) return aDate.localeCompare(bDate);
+  const aInv = normalizeInvoiceNo(a.PR_InvoiceNo || a.TwoB_InvoiceNo || "");
+  const bInv = normalizeInvoiceNo(b.PR_InvoiceNo || b.TwoB_InvoiceNo || "");
+  return aInv.localeCompare(bInv);
+}
+
+function getRowTaxable(row) {
+  return toNumber(row.PR_TaxableValue || row.TwoB_TaxableValue || row.TaxableValue);
+}
+
+function getRowTotalTax(row) {
+  return toNumber(row.PR_TotalTax || row.TwoB_TotalTax || row.ComputedTotalTax);
 }
 
 function buildPartySummaryRows(matchedRows, valueDiffRows, notIn2BRows, notInPRRows) {
