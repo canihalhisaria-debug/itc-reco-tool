@@ -14,7 +14,8 @@ const FIELD_DEFS = [
 const DEFAULT_SETTINGS = {
   taxableTolerance: 1,
   taxTolerance: 1,
-  monthOnly: true,
+  aggregate2b: true,
+  aggregatePr: true,
 };
 
 const REMARKS = {
@@ -59,7 +60,8 @@ const exportPrBtn = document.getElementById("exportPrBtn");
 const export2bBtn = document.getElementById("export2bBtn");
 const taxableToleranceInput = document.getElementById("taxableTolerance");
 const taxToleranceInput = document.getElementById("taxTolerance");
-const monthOnlyInput = document.getElementById("monthOnly");
+const aggregate2bInput = document.getElementById("aggregate2b");
+const aggregatePrInput = document.getElementById("aggregatePr");
 const resultSearchInput = document.getElementById("resultSearch");
 
 file2bInput.addEventListener("change", (e) => handleFile(e.target.files[0], "2b"));
@@ -73,9 +75,9 @@ export2bBtn.addEventListener("click", () => exportDataset("2B"));
   input.addEventListener("input", syncSettingsFromUi);
 });
 
-if (monthOnlyInput) {
-  monthOnlyInput.addEventListener("change", syncSettingsFromUi);
-}
+[aggregate2bInput, aggregatePrInput].forEach((input) => {
+  input.addEventListener("change", syncSettingsFromUi);
+});
 
 resultSearchInput.addEventListener("input", () => {
   state.resultSearch = normalizeText(resultSearchInput.value).toLowerCase();
@@ -158,13 +160,15 @@ function updateReconcileButtonState() {
 function syncSettingsToUi() {
   taxableToleranceInput.value = String(state.settings.taxableTolerance);
   taxToleranceInput.value = String(state.settings.taxTolerance);
-  if (monthOnlyInput) monthOnlyInput.checked = Boolean(state.settings.monthOnly);
+  aggregate2bInput.checked = Boolean(state.settings.aggregate2b);
+  aggregatePrInput.checked = Boolean(state.settings.aggregatePr);
 }
 
 function syncSettingsFromUi() {
   state.settings.taxableTolerance = toNumber(taxableToleranceInput.value);
   state.settings.taxTolerance = toNumber(taxToleranceInput.value);
-  if (monthOnlyInput) state.settings.monthOnly = monthOnlyInput.checked;
+  state.settings.aggregate2b = aggregate2bInput.checked;
+  state.settings.aggregatePr = aggregatePrInput.checked;
 }
 
 function normalizeRow(row, mapping, sourceIndex, sourceType) {
@@ -173,9 +177,8 @@ function normalizeRow(row, mapping, sourceIndex, sourceType) {
   const cgst = roundTo2(toNumber(getMapped(row, mapping, "CGST")));
   const sgst = roundTo2(toNumber(getMapped(row, mapping, "SGST")));
   const cess = mapping.CESS ? roundTo2(toNumber(getMapped(row, mapping, "CESS"))) : 0;
-  const dateSource = getMapped(row, mapping, "Invoice Date");
-  const invoiceDate = normalizeDate(dateSource);
-  const computedTotalTax = roundTo2(computeTotalTax({ igst, cgst, sgst, cess }));
+  const baseGST = roundTo2(igst + cgst + sgst);
+  const computedTotalTax = roundTo2(baseGST + cess);
 
   return {
     sourceType,
@@ -184,133 +187,129 @@ function normalizeRow(row, mapping, sourceIndex, sourceType) {
     supplierName: normalizeText(getMapped(row, mapping, "Supplier Name")),
     invoiceNo: normalizeText(getMapped(row, mapping, "Invoice No")),
     invoiceNoNorm: normalizeInvoiceNo(getMapped(row, mapping, "Invoice No")),
-    invoiceDate,
-    invoiceMonth: getInvoiceMonth(invoiceDate),
+    invoiceDate: normalizeDate(getMapped(row, mapping, "Invoice Date")),
     taxableValue,
     igst,
     cgst,
     sgst,
     cess,
+    baseGST,
     computedTotalTax,
-    lineCount: 1,
+    sourceRowNos: [sourceIndex],
   };
 }
 
-function getMapped(row, mapping, key) {
-  const column = mapping[key];
-  return column ? row[column] : "";
-}
-
-function getInvoiceMonth(invoiceDate) {
-  if (!invoiceDate) return "NA";
-  return invoiceDate.slice(0, 7);
-}
-
-function buildCanonicalKey(row) {
+function buildGroupKey(row) {
   if (!row.invoiceNoNorm) return "";
-  const datePart = state.settings.monthOnly ? row.invoiceMonth : row.invoiceDate || "NA";
-  return `${normalizeGSTIN(row.gstin)}||${normalizeInvoiceNo(row.invoiceNo)}||${datePart}`;
+  if (row.gstin && row.invoiceDate) return `GSTIN_DATE||${row.gstin}||${row.invoiceNoNorm}||${row.invoiceDate}`;
+  if (row.gstin && !row.invoiceDate) return `GSTIN_ONLY||${row.gstin}||${row.invoiceNoNorm}`;
+  if (row.supplierName && row.invoiceDate) return `SUPPLIER_DATE||${normalizeSupplierName(row.supplierName)}||${row.invoiceNoNorm}||${row.invoiceDate}`;
+  if (row.supplierName) return `SUPPLIER_ONLY||${normalizeSupplierName(row.supplierName)}||${row.invoiceNoNorm}`;
+  return "";
 }
 
-function aggregateRows(rows) {
-  const aggregated = [];
-  const invoiceMap = new Map();
+function aggregateRows(rows, shouldAggregate) {
+  if (!shouldAggregate) {
+    return rows.map((row) => ({ ...row, groupKey: `ROW||${row.sourceType}||${row.sourceIndex}` }));
+  }
+
+  const grouped = [];
+  const map = new Map();
 
   rows.forEach((row) => {
-    const key = buildCanonicalKey(row);
+    const key = buildGroupKey(row);
     if (!key) {
-      aggregated.push({ ...row, canonicalKey: `NOINV||${row.sourceType}||${row.sourceIndex}` });
+      grouped.push({ ...row, groupKey: `NOINV||${row.sourceType}||${row.sourceIndex}` });
       return;
     }
 
-    if (!invoiceMap.has(key)) {
-      invoiceMap.set(key, {
+    if (!map.has(key)) {
+      map.set(key, {
         ...row,
-        canonicalKey: key,
-        lineCount: 0,
+        groupKey: key,
+        sourceRowNos: [],
       });
     }
 
-    const target = invoiceMap.get(key);
+    const target = map.get(key);
     target.taxableValue = roundTo2(target.taxableValue + row.taxableValue);
     target.igst = roundTo2(target.igst + row.igst);
     target.cgst = roundTo2(target.cgst + row.cgst);
     target.sgst = roundTo2(target.sgst + row.sgst);
     target.cess = roundTo2(target.cess + row.cess);
+    target.baseGST = roundTo2(target.baseGST + row.baseGST);
     target.computedTotalTax = roundTo2(target.computedTotalTax + row.computedTotalTax);
-    target.lineCount += 1;
-    if (!target.supplierName && row.supplierName) target.supplierName = row.supplierName;
-    if ((!target.invoiceDate || row.invoiceDate < target.invoiceDate) && row.invoiceDate) {
-      target.invoiceDate = row.invoiceDate;
-      target.invoiceMonth = row.invoiceMonth;
-    }
+    target.sourceRowNos.push(...row.sourceRowNos);
   });
 
-  return aggregated.concat(Array.from(invoiceMap.values()));
+  return grouped.concat(Array.from(map.values()));
 }
 
 function reconcile() {
   syncSettingsFromUi();
 
-  const prRows = aggregateRows(state.rawBooks.map((row, idx) => normalizeRow(row, state.mappedBooks, idx, "PR")));
-  const twoBRows = aggregateRows(state.raw2b.map((row, idx) => normalizeRow(row, state.mapped2b, idx, "2B")));
+  const normalizedPrRows = state.rawBooks.map((row, idx) => normalizeRow(row, state.mappedBooks, idx, "PR"));
+  const normalized2bRows = state.raw2b.map((row, idx) => normalizeRow(row, state.mapped2b, idx, "2B"));
+  const prGroups = aggregateRows(normalizedPrRows, state.settings.aggregatePr);
+  const b2Groups = aggregateRows(normalized2bRows, state.settings.aggregate2b);
 
-  const twoBByKey = new Map(twoBRows.map((row) => [row.canonicalKey, row]));
+  const b2ByKey = new Map(b2Groups.map((row) => [row.groupKey, row]));
   const matchedKeys = new Set();
 
-  const matched = [];
-  const valueDifference = [];
-  const notIn2B = [];
-  const notInPR = [];
+  const prRemarks = new Array(normalizedPrRows.length).fill(REMARKS.NOT_IN_2B);
+  const b2Remarks = new Array(normalized2bRows.length).fill(REMARKS.NOT_IN_PR);
 
-  const prExportRows = [];
-  const twoBExportRows = [];
-
-  prRows.forEach((prRow) => {
-    const twoBRow = twoBByKey.get(prRow.canonicalKey);
-    if (!twoBRow || prRow.canonicalKey.startsWith("NOINV||")) {
-      const row = toDisplayRow(prRow, REMARKS.NOT_IN_2B);
-      notIn2B.push(row);
-      prExportRows.push(row);
+  prGroups.forEach((prGroup) => {
+    const b2Group = b2ByKey.get(prGroup.groupKey);
+    if (!b2Group || prGroup.groupKey.startsWith("NOINV||")) {
+      prGroup.sourceRowNos.forEach((idx) => {
+        prRemarks[idx] = REMARKS.NOT_IN_2B;
+      });
       return;
     }
 
-    matchedKeys.add(prRow.canonicalKey);
-    const taxableDiff = Math.abs(roundTo2(prRow.taxableValue - twoBRow.taxableValue));
-    const taxDiff = Math.abs(roundTo2(prRow.computedTotalTax - twoBRow.computedTotalTax));
-    const remark = taxableDiff <= state.settings.taxableTolerance && taxDiff <= state.settings.taxTolerance ? REMARKS.MATCHED : REMARKS.VALUE_DIFFERENCE;
+    matchedKeys.add(prGroup.groupKey);
+    const taxableDiff = Math.abs(roundTo2(prGroup.taxableValue - b2Group.taxableValue));
+    const taxDiff = Math.abs(roundTo2(prGroup.baseGST - b2Group.baseGST));
+    const cessDiff = Math.abs(roundTo2(prGroup.cess - b2Group.cess));
+    const withinTolerance = taxableDiff <= state.settings.taxableTolerance && taxDiff <= state.settings.taxTolerance && cessDiff <= state.settings.taxTolerance;
+    const remark = withinTolerance ? REMARKS.MATCHED : REMARKS.VALUE_DIFFERENCE;
 
-    const prDisplay = toDisplayRow(prRow, remark);
-    const twoBDisplay = toDisplayRow(twoBRow, remark);
-    if (remark === REMARKS.MATCHED) matched.push(prDisplay);
-    else valueDifference.push(prDisplay);
-    prExportRows.push(prDisplay);
-    twoBExportRows.push(twoBDisplay);
+    prGroup.sourceRowNos.forEach((idx) => {
+      prRemarks[idx] = remark;
+    });
+
+    b2Group.sourceRowNos.forEach((idx) => {
+      b2Remarks[idx] = remark;
+    });
   });
 
-  twoBRows.forEach((twoBRow) => {
-    if (twoBRow.canonicalKey.startsWith("NOINV||") || !matchedKeys.has(twoBRow.canonicalKey)) {
-      const row = toDisplayRow(twoBRow, REMARKS.NOT_IN_PR);
-      notInPR.push(row);
-      twoBExportRows.push(row);
+  b2Groups.forEach((b2Group) => {
+    if (b2Group.groupKey.startsWith("NOINV||") || !matchedKeys.has(b2Group.groupKey)) {
+      b2Group.sourceRowNos.forEach((idx) => {
+        b2Remarks[idx] = REMARKS.NOT_IN_PR;
+      });
     }
   });
 
+  const prExportRows = normalizedPrRows.map((row, idx) => toDisplayRow(row, prRemarks[idx]));
+  const b2ExportRows = normalized2bRows.map((row, idx) => toDisplayRow(row, b2Remarks[idx]));
+
   state.results = {
-    Matched: matched.sort(compareBusinessExportRows),
-    "Value Difference": valueDifference.sort(compareBusinessExportRows),
-    "Not in 2B": notIn2B.sort(compareBusinessExportRows),
-    "Not in PR": notInPR.sort(compareBusinessExportRows),
+    Matched: prExportRows.filter((r) => r.Remark === REMARKS.MATCHED).sort(compareBusinessExportRows),
+    "Value Difference": prExportRows.filter((r) => r.Remark === REMARKS.VALUE_DIFFERENCE).sort(compareBusinessExportRows),
+    "Not in 2B": prExportRows.filter((r) => r.Remark === REMARKS.NOT_IN_2B).sort(compareBusinessExportRows),
+    "Not in PR": b2ExportRows.filter((r) => r.Remark === REMARKS.NOT_IN_PR).sort(compareBusinessExportRows),
     PurchaseRegisterExport: prExportRows.sort(compareBusinessExportRows),
-    GSTR2BExport: twoBExportRows.sort(compareBusinessExportRows),
+    GSTR2BExport: b2ExportRows.sort(compareBusinessExportRows),
   };
 
-  document.getElementById("totalBooks").textContent = String(prRows.length);
-  document.getElementById("total2b").textContent = String(twoBRows.length);
-  document.getElementById("matchedCount").textContent = String(matched.length);
-  document.getElementById("missing2bCount").textContent = String(notIn2B.length);
-  document.getElementById("missingBooksCount").textContent = String(notInPR.length);
-  document.getElementById("valueDiffCount").textContent = String(valueDifference.length);
+  document.getElementById("totalBooks").textContent = String(normalizedPrRows.length);
+  document.getElementById("total2b").textContent = String(normalized2bRows.length);
+  document.getElementById("matchedCount").textContent = String(state.results.Matched.length);
+  document.getElementById("missing2bCount").textContent = String(state.results["Not in 2B"].length);
+  document.getElementById("missingBooksCount").textContent = String(state.results["Not in PR"].length);
+  document.getElementById("valueDiffCount").textContent = String(state.results["Value Difference"].length);
 
   state.activeTab = "Matched";
   renderTabs();
@@ -398,7 +397,7 @@ function exportDataset(type) {
   applyWorksheetTemplate(sheet, rows.length + 1);
 
   const workbook = XLSX.utils.book_new();
-  const tabName = `${type}_${state.activeTab.replace(/\s+/g, "_")}`;
+  const tabName = `${type}_with_Remarks`;
   XLSX.utils.book_append_sheet(workbook, sheet, tabName.slice(0, 31));
   XLSX.writeFile(workbook, `${tabName}_${getTodayStamp()}.xlsx`);
 }
@@ -496,6 +495,11 @@ function getActiveRows() {
   });
 }
 
+function getMapped(row, mapping, key) {
+  const column = mapping[key];
+  return column ? row[column] : "";
+}
+
 function normalizeDate(value) {
   if (!value && value !== 0) return "";
 
@@ -557,10 +561,6 @@ function toNumber(value) {
   if (!text || text === "-") return 0;
   const n = parseFloat(text);
   return Number.isFinite(n) ? n : 0;
-}
-
-function computeTotalTax(row) {
-  return roundTo2(toNumber(row.igst) + toNumber(row.cgst) + toNumber(row.sgst) + toNumber(row.cess));
 }
 
 function roundTo2(value) {
