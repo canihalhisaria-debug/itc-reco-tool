@@ -34,13 +34,6 @@ const EXPORT_COLUMNS = [
   "CGST",
   "SGST",
   "CESS",
-  "ComputedCESS",
-  "ComputedTotalTax",
-  "TaxableDiff",
-  "TaxDiff",
-  "CessDiff",
-  "AggregationKey",
-  "SourceRowCount",
   "Remark",
 ];
 
@@ -59,6 +52,10 @@ const state = {
     "Not in PR": [],
     PurchaseRegisterExport: [],
     GSTR2BExport: [],
+  },
+  baselineTotals: {
+    PR: null,
+    "2B": null,
   },
   activeTab: "Matched",
   resultSearch: "",
@@ -249,7 +246,7 @@ function aggregateRowsByInvoice(rows) {
         computedCESS: 0,
         computedTotalTax: 0,
         sourceRowCount: 0,
-        sourceRows: [],
+        sourceRowIdxs: [],
       });
     }
 
@@ -262,7 +259,7 @@ function aggregateRowsByInvoice(rows) {
     target.computedCESS = target.cess;
     target.computedTotalTax = roundTo2(target.igst + target.cgst + target.sgst + target.cess);
     target.sourceRowCount += 1;
-    target.sourceRows.push(row.sourceIndex);
+    target.sourceRowIdxs.push(row.sourceIndex);
 
     if (!target.supplierName && row.supplierName) target.supplierName = row.supplierName;
     if ((!target.invoiceDate || row.invoiceDate < target.invoiceDate) && row.invoiceDate) target.invoiceDate = row.invoiceDate;
@@ -276,16 +273,16 @@ function aggregateRowsByInvoice(rows) {
 function reconcile() {
   syncSettingsFromUi();
 
-  const prOriginalRows = state.rawBooks.map((row, idx) => normalizeRow(row, state.mappedBooks, idx, "PR"));
-  const twoBOriginalRows = state.raw2b.map((row, idx) => normalizeRow(row, state.mapped2b, idx, "2B"));
+  const prRowsForMatching = state.rawBooks.map((row, idx) => normalizeRow(row, state.mappedBooks, idx, "PR"));
+  const twoBRowsForMatching = state.raw2b.map((row, idx) => normalizeRow(row, state.mapped2b, idx, "2B"));
 
-  const prAggregation = aggregateRowsByInvoice(prOriginalRows);
-  const twoBAggregation = aggregateRowsByInvoice(twoBOriginalRows);
+  const prAggregation = aggregateRowsByInvoice(prRowsForMatching);
+  const twoBAggregation = aggregateRowsByInvoice(twoBRowsForMatching);
   const prGrouped = prAggregation.grouped;
   const twoBGrouped = twoBAggregation.grouped;
 
-  const invoiceOutcomeByKeyPR = new Map();
-  const invoiceOutcomeByKey2B = new Map();
+  const remarkByPrRowIdx = new Map();
+  const remarkBy2BRowIdx = new Map();
   const matchedKeys = new Set();
 
   const matched = [];
@@ -299,7 +296,7 @@ function reconcile() {
 
     if (!twoBInvoice) {
       const outcome = buildInvoiceOutcome(prInvoice, REMARKS.NOT_IN_2B);
-      invoiceOutcomeByKeyPR.set(key, outcome);
+      prInvoice.sourceRowIdxs.forEach((idx) => remarkByPrRowIdx.set(idx, REMARKS.NOT_IN_2B));
       notIn2B.push(toDisplayRow(outcome));
       return;
     }
@@ -311,9 +308,8 @@ function reconcile() {
     const remark = Math.abs(taxableDiff) <= state.settings.taxableTolerance && Math.abs(taxDiff) <= state.settings.taxTolerance ? REMARKS.MATCHED : REMARKS.VALUE_DIFFERENCE;
 
     const prOutcome = buildInvoiceOutcome(prInvoice, remark, taxableDiff, taxDiff, cessDiff);
-    const twoBOutcome = buildInvoiceOutcome(twoBInvoice, remark, taxableDiff, taxDiff, cessDiff);
-    invoiceOutcomeByKeyPR.set(key, prOutcome);
-    invoiceOutcomeByKey2B.set(key, twoBOutcome);
+    prInvoice.sourceRowIdxs.forEach((idx) => remarkByPrRowIdx.set(idx, remark));
+    twoBInvoice.sourceRowIdxs.forEach((idx) => remarkBy2BRowIdx.set(idx, remark));
 
     if (remark === REMARKS.MATCHED) matched.push(toDisplayRow(prOutcome));
     else valueDifference.push(toDisplayRow(prOutcome));
@@ -323,22 +319,23 @@ function reconcile() {
     const key = twoBInvoice.aggregationKey;
     if (key.startsWith("NO_KEY||") || !matchedKeys.has(key)) {
       const outcome = buildInvoiceOutcome(twoBInvoice, REMARKS.NOT_IN_PR);
-      invoiceOutcomeByKey2B.set(key, outcome);
+      twoBInvoice.sourceRowIdxs.forEach((idx) => remarkBy2BRowIdx.set(idx, REMARKS.NOT_IN_PR));
       notInPR.push(toDisplayRow(outcome));
     }
   });
 
-  const prExportRows = prOriginalRows.map((row) => {
-    const key = prAggregation.bySourceIndex.get(row.sourceIndex) || row.aggregationKey;
-    const invoiceOutcome = invoiceOutcomeByKeyPR.get(key) || buildInvoiceOutcome(row, REMARKS.NOT_IN_2B);
-    return toDisplayRow(invoiceOutcome, row);
+  const prExportRows = state.rawBooks.map((row, idx) => {
+    const remark = remarkByPrRowIdx.get(idx) || REMARKS.NOT_IN_2B;
+    return buildRawExportRow(row, state.mappedBooks, remark);
   });
 
-  const twoBExportRows = twoBOriginalRows.map((row) => {
-    const key = twoBAggregation.bySourceIndex.get(row.sourceIndex) || row.aggregationKey;
-    const invoiceOutcome = invoiceOutcomeByKey2B.get(key) || buildInvoiceOutcome(row, REMARKS.NOT_IN_PR);
-    return toDisplayRow(invoiceOutcome, row);
+  const twoBExportRows = state.raw2b.map((row, idx) => {
+    const remark = remarkBy2BRowIdx.get(idx) || REMARKS.NOT_IN_PR;
+    return buildRawExportRow(row, state.mapped2b, remark);
   });
+
+  state.baselineTotals.PR = calculateTotals(prRowsForMatching);
+  state.baselineTotals["2B"] = calculateTotals(twoBRowsForMatching);
 
   state.results = {
     Matched: matched.sort(compareBusinessExportRows),
@@ -364,7 +361,6 @@ function reconcile() {
 }
 
 function buildInvoiceOutcome(invoiceRow, remark, taxableDiff = "", taxDiff = "", cessDiff = "") {
-  const showDiffs = remark === REMARKS.VALUE_DIFFERENCE;
   return {
     gstin: invoiceRow?.gstin || "",
     supplierName: invoiceRow?.supplierName || "",
@@ -375,13 +371,9 @@ function buildInvoiceOutcome(invoiceRow, remark, taxableDiff = "", taxDiff = "",
     cgst: invoiceRow?.cgst ?? 0,
     sgst: invoiceRow?.sgst ?? 0,
     cess: invoiceRow?.cess ?? 0,
-    computedCESS: invoiceRow?.computedCESS ?? invoiceRow?.cess ?? 0,
-    computedTotalTax: invoiceRow?.computedTotalTax ?? 0,
-    taxableDiff: showDiffs ? taxableDiff : "",
-    taxDiff: showDiffs ? taxDiff : "",
-    cessDiff: showDiffs ? cessDiff : "",
-    aggregationKey: invoiceRow?.aggregationKey || "",
-    sourceRowCount: invoiceRow?.sourceRowCount ?? 1,
+    taxableDiff,
+    taxDiff,
+    cessDiff,
     remark,
   };
 }
@@ -398,14 +390,22 @@ function toDisplayRow(invoiceOutcome, originalRow = null) {
     CGST: rowBase?.cgst ?? invoiceOutcome?.cgst ?? "",
     SGST: rowBase?.sgst ?? invoiceOutcome?.sgst ?? "",
     CESS: rowBase?.cess ?? invoiceOutcome?.cess ?? 0,
-    ComputedCESS: rowBase?.computedCESS ?? rowBase?.cess ?? invoiceOutcome?.computedCESS ?? 0,
-    ComputedTotalTax: rowBase?.computedTotalTax ?? invoiceOutcome?.computedTotalTax ?? 0,
-    TaxableDiff: invoiceOutcome?.taxableDiff ?? "",
-    TaxDiff: invoiceOutcome?.taxDiff ?? "",
-    CessDiff: invoiceOutcome?.cessDiff ?? "",
-    AggregationKey: invoiceOutcome?.aggregationKey || rowBase?.aggregationKey || "",
-    SourceRowCount: invoiceOutcome?.sourceRowCount ?? 1,
     Remark: invoiceOutcome?.remark || "",
+  };
+}
+
+function buildRawExportRow(rawRow, mapping, remark) {
+  return {
+    GSTIN: normalizeText(getMapped(rawRow, mapping, "GSTIN")),
+    SupplierName: normalizeText(getMapped(rawRow, mapping, "Supplier Name")),
+    InvoiceNo: normalizeText(getMapped(rawRow, mapping, "Invoice No")),
+    InvoiceDate: normalizeDate(getMapped(rawRow, mapping, "Invoice Date")),
+    TaxableValue: getMapped(rawRow, mapping, "Taxable Value"),
+    IGST: getMapped(rawRow, mapping, "IGST"),
+    CGST: getMapped(rawRow, mapping, "CGST"),
+    SGST: getMapped(rawRow, mapping, "SGST"),
+    CESS: mapping.CESS ? getMapped(rawRow, mapping, "CESS") : 0,
+    Remark: remark,
   };
 }
 
@@ -467,6 +467,7 @@ function getRemarkClass(remark) {
 
 function exportDataset(type) {
   const sourceRows = type === "PR" ? state.results.PurchaseRegisterExport : state.results.GSTR2BExport;
+  if (!verifyRawTotalsUnchanged(type, sourceRows)) return;
   const rows = sourceRows.map((row) => formatExportRow(row));
   const sheet = XLSX.utils.json_to_sheet(rows.length ? rows : [createEmptyExportRow()], { header: EXPORT_COLUMNS });
   applyWorksheetTemplate(sheet, rows.length + 1);
@@ -488,22 +489,61 @@ function formatExportRow(row) {
     CGST: row.CGST ?? "",
     SGST: row.SGST ?? "",
     CESS: row.CESS ?? 0,
-    ComputedCESS: row.ComputedCESS ?? 0,
-    ComputedTotalTax: row.ComputedTotalTax ?? 0,
-    TaxableDiff: row.TaxableDiff ?? "",
-    TaxDiff: row.TaxDiff ?? "",
-    CessDiff: row.CessDiff ?? "",
-    AggregationKey: row.AggregationKey || "",
-    SourceRowCount: row.SourceRowCount ?? 1,
     Remark: sanitizeRemark(row.Remark),
   };
 }
 
 function createEmptyExportRow() {
   return EXPORT_COLUMNS.reduce((acc, col) => {
-    acc[col] = ["CESS", "ComputedCESS", "ComputedTotalTax", "SourceRowCount"].includes(col) ? 0 : "";
+    acc[col] = col === "CESS" ? 0 : "";
     return acc;
   }, {});
+}
+
+function calculateTotals(rows) {
+  return rows.reduce(
+    (acc, row) => {
+      acc.taxableValue = roundTo2(acc.taxableValue + toNumber(row.taxableValue));
+      acc.igst = roundTo2(acc.igst + toNumber(row.igst));
+      acc.cgst = roundTo2(acc.cgst + toNumber(row.cgst));
+      acc.sgst = roundTo2(acc.sgst + toNumber(row.sgst));
+      acc.cess = roundTo2(acc.cess + toNumber(row.cess));
+      return acc;
+    },
+    { taxableValue: 0, igst: 0, cgst: 0, sgst: 0, cess: 0 }
+  );
+}
+
+function calculateExportTotals(rows) {
+  return rows.reduce(
+    (acc, row) => {
+      acc.taxableValue = roundTo2(acc.taxableValue + toNumber(row.TaxableValue));
+      acc.igst = roundTo2(acc.igst + toNumber(row.IGST));
+      acc.cgst = roundTo2(acc.cgst + toNumber(row.CGST));
+      acc.sgst = roundTo2(acc.sgst + toNumber(row.SGST));
+      acc.cess = roundTo2(acc.cess + toNumber(row.CESS));
+      return acc;
+    },
+    { taxableValue: 0, igst: 0, cgst: 0, sgst: 0, cess: 0 }
+  );
+}
+
+function verifyRawTotalsUnchanged(type, exportRows) {
+  const baseline = state.baselineTotals[type];
+  const after = calculateExportTotals(exportRows);
+  const same =
+    baseline &&
+    baseline.taxableValue === after.taxableValue &&
+    baseline.igst === after.igst &&
+    baseline.cgst === after.cgst &&
+    baseline.sgst === after.sgst &&
+    baseline.cess === after.cess;
+
+  if (!same) {
+    console.error(`[${type}] Export stopped due to totals mismatch`, { baseline, after });
+    return false;
+  }
+  return true;
 }
 
 function sanitizeRemark(remark) {
@@ -525,7 +565,7 @@ function applyWorksheetTemplate(sheet, rowCount) {
   sheet["!freeze"] = { xSplit: 0, ySplit: 1, topLeftCell: "A2", activePane: "bottomLeft", state: "frozen" };
   sheet["!cols"] = [
     { wch: 16 }, { wch: 32 }, { wch: 18 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
-    { wch: 14 }, { wch: 16 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 24 }, { wch: 12 }, { wch: 18 },
+    { wch: 18 },
   ];
 
   const headerStyle = {
@@ -540,7 +580,7 @@ function applyWorksheetTemplate(sheet, rowCount) {
   }
 
   for (let r = 1; r < rowCount; r += 1) {
-    [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15].forEach((c) => {
+    [4, 5, 6, 7, 8].forEach((c) => {
       const ref = XLSX.utils.encode_cell({ r, c });
       if (sheet[ref]) sheet[ref].s = { alignment: { horizontal: "right", vertical: "center" } };
     });
