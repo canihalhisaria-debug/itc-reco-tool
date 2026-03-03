@@ -55,7 +55,7 @@
 
     <section class="card">
       <h2>3) Matching Settings</h2>
-      <p class="muted">2B multi-line invoices are auto-summed before matching.</p>
+      <p class="muted">Configure tolerance and whether rows should be grouped at invoice level before matching.</p>
       <div class="upload-grid">
         <label class="field">
           <span>Taxable Tolerance</span>
@@ -66,10 +66,16 @@
           <input type="number" id="taxTolerance" value="1" min="0" step="0.01" />
         </label>
       </div>
-      <label class="checkbox-row" style="margin-top: 10px;">
-        <input type="checkbox" id="monthOnly" checked />
-        <span>Match invoice keys by invoice month (YYYY-MM)</span>
-      </label>
+      <div class="upload-grid" style="margin-top: 10px;">
+        <label class="checkbox-row">
+          <input type="checkbox" id="aggregate2b" checked />
+          <span>Aggregate 2B rows by Invoice</span>
+        </label>
+        <label class="checkbox-row">
+          <input type="checkbox" id="aggregatePr" checked />
+          <span>Aggregate PR rows by Invoice</span>
+        </label>
+      </div>
       <div class="actions" style="margin-top: 1rem;">
         <button id="reconcileBtn" disabled>Run Reconciliation</button>
       </div>
