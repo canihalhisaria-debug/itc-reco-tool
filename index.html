@@ -67,9 +67,10 @@
         </label>
       </div>
       <label class="checkbox-row" style="margin-top: 10px;">
-        <input type="checkbox" id="monthOnly" checked />
-        <span>Match invoice keys by invoice month (YYYY-MM)</span>
+        <input type="checkbox" id="invoiceLevelAggregate" checked />
+        <span>Match Mode: Invoice-level (Aggregate)</span>
       </label>
+      <p class="muted" style="margin-top: 6px;">2B same invoice multiple lines will be summed before matching.</p>
       <div class="actions" style="margin-top: 1rem;">
         <button id="reconcileBtn" disabled>Run Reconciliation</button>
       </div>

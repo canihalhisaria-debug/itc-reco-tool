@@ -14,7 +14,7 @@ const FIELD_DEFS = [
 const DEFAULT_SETTINGS = {
   taxableTolerance: 1,
   taxTolerance: 1,
-  monthOnly: true,
+  invoiceLevelAggregate: true,
 };
 
 const REMARKS = {
@@ -24,7 +24,25 @@ const REMARKS = {
   NOT_IN_PR: "Not in PR",
 };
 
-const EXPORT_COLUMNS = ["GSTIN", "SupplierName", "InvoiceNo", "InvoiceDate", "TaxableValue", "IGST", "CGST", "SGST", "CESS", "ComputedTotalTax", "Remark"];
+const EXPORT_COLUMNS = [
+  "GSTIN",
+  "SupplierName",
+  "InvoiceNo",
+  "InvoiceDate",
+  "TaxableValue",
+  "IGST",
+  "CGST",
+  "SGST",
+  "CESS",
+  "ComputedCESS",
+  "ComputedTotalTax",
+  "TaxableDiff",
+  "TaxDiff",
+  "CessDiff",
+  "AggregationKey",
+  "SourceRowCount",
+  "Remark",
+];
 
 const state = {
   raw2b: [],
@@ -59,7 +77,7 @@ const exportPrBtn = document.getElementById("exportPrBtn");
 const export2bBtn = document.getElementById("export2bBtn");
 const taxableToleranceInput = document.getElementById("taxableTolerance");
 const taxToleranceInput = document.getElementById("taxTolerance");
-const monthOnlyInput = document.getElementById("monthOnly");
+const invoiceLevelAggregateInput = document.getElementById("invoiceLevelAggregate");
 const resultSearchInput = document.getElementById("resultSearch");
 
 file2bInput.addEventListener("change", (e) => handleFile(e.target.files[0], "2b"));
@@ -73,8 +91,8 @@ export2bBtn.addEventListener("click", () => exportDataset("2B"));
   input.addEventListener("input", syncSettingsFromUi);
 });
 
-if (monthOnlyInput) {
-  monthOnlyInput.addEventListener("change", syncSettingsFromUi);
+if (invoiceLevelAggregateInput) {
+  invoiceLevelAggregateInput.addEventListener("change", syncSettingsFromUi);
 }
 
 resultSearchInput.addEventListener("input", () => {
@@ -158,13 +176,13 @@ function updateReconcileButtonState() {
 function syncSettingsToUi() {
   taxableToleranceInput.value = String(state.settings.taxableTolerance);
   taxToleranceInput.value = String(state.settings.taxTolerance);
-  if (monthOnlyInput) monthOnlyInput.checked = Boolean(state.settings.monthOnly);
+  if (invoiceLevelAggregateInput) invoiceLevelAggregateInput.checked = Boolean(state.settings.invoiceLevelAggregate);
 }
 
 function syncSettingsFromUi() {
   state.settings.taxableTolerance = toNumber(taxableToleranceInput.value);
   state.settings.taxTolerance = toNumber(taxToleranceInput.value);
-  if (monthOnlyInput) state.settings.monthOnly = monthOnlyInput.checked;
+  if (invoiceLevelAggregateInput) state.settings.invoiceLevelAggregate = invoiceLevelAggregateInput.checked;
 }
 
 function normalizeRow(row, mapping, sourceIndex, sourceType) {
@@ -176,24 +194,32 @@ function normalizeRow(row, mapping, sourceIndex, sourceType) {
   const dateSource = getMapped(row, mapping, "Invoice Date");
   const invoiceDate = normalizeDate(dateSource);
   const computedTotalTax = roundTo2(computeTotalTax({ igst, cgst, sgst, cess }));
+  const gstin = normalizeGSTIN(getMapped(row, mapping, "GSTIN"));
+  const invoiceNoRaw = normalizeText(getMapped(row, mapping, "Invoice No"));
+  const invoiceNoNorm = normalizeInvoiceNo(invoiceNoRaw);
 
   return {
     sourceType,
     sourceIndex,
-    gstin: normalizeGSTIN(getMapped(row, mapping, "GSTIN")),
+    gstin,
     supplierName: normalizeText(getMapped(row, mapping, "Supplier Name")),
-    invoiceNo: normalizeText(getMapped(row, mapping, "Invoice No")),
-    invoiceNoNorm: normalizeInvoiceNo(getMapped(row, mapping, "Invoice No")),
+    invoiceNo: invoiceNoRaw,
+    invoiceNoNorm,
     invoiceDate,
-    invoiceMonth: getInvoiceMonth(invoiceDate),
     taxableValue,
     igst,
     cgst,
     sgst,
     cess,
+    computedCESS: cess,
     computedTotalTax,
-    lineCount: 1,
+    aggregationKey: buildAggregationKey(gstin, invoiceNoNorm),
   };
+}
+
+function buildAggregationKey(gstin, invoiceNoNorm) {
+  if (!gstin || !invoiceNoNorm) return "";
+  return `${normalizeGSTIN(gstin)}||${normalizeInvoiceNo(invoiceNoNorm)}`;
 }
 
 function getMapped(row, mapping, key) {
@@ -201,61 +227,65 @@ function getMapped(row, mapping, key) {
   return column ? row[column] : "";
 }
 
-function getInvoiceMonth(invoiceDate) {
-  if (!invoiceDate) return "NA";
-  return invoiceDate.slice(0, 7);
-}
-
-function buildCanonicalKey(row) {
-  if (!row.invoiceNoNorm) return "";
-  const datePart = state.settings.monthOnly ? row.invoiceMonth : row.invoiceDate || "NA";
-  return `${normalizeGSTIN(row.gstin)}||${normalizeInvoiceNo(row.invoiceNo)}||${datePart}`;
-}
-
-function aggregateRows(rows) {
-  const aggregated = [];
-  const invoiceMap = new Map();
+function aggregateRowsByInvoice(rows) {
+  const grouped = new Map();
+  const bySourceIndex = new Map();
 
   rows.forEach((row) => {
-    const key = buildCanonicalKey(row);
-    if (!key) {
-      aggregated.push({ ...row, canonicalKey: `NOINV||${row.sourceType}||${row.sourceIndex}` });
-      return;
-    }
+    const baseKey = row.aggregationKey || `NO_KEY||${row.sourceType}||${row.sourceIndex}`;
 
-    if (!invoiceMap.has(key)) {
-      invoiceMap.set(key, {
-        ...row,
-        canonicalKey: key,
-        lineCount: 0,
+    if (!grouped.has(baseKey)) {
+      grouped.set(baseKey, {
+        aggregationKey: baseKey,
+        gstin: row.gstin,
+        supplierName: row.supplierName,
+        invoiceNo: row.invoiceNo,
+        invoiceDate: row.invoiceDate || "",
+        taxableValue: 0,
+        igst: 0,
+        cgst: 0,
+        sgst: 0,
+        cess: 0,
+        computedCESS: 0,
+        computedTotalTax: 0,
+        sourceRowCount: 0,
+        sourceRows: [],
       });
     }
 
-    const target = invoiceMap.get(key);
+    const target = grouped.get(baseKey);
     target.taxableValue = roundTo2(target.taxableValue + row.taxableValue);
     target.igst = roundTo2(target.igst + row.igst);
     target.cgst = roundTo2(target.cgst + row.cgst);
     target.sgst = roundTo2(target.sgst + row.sgst);
     target.cess = roundTo2(target.cess + row.cess);
-    target.computedTotalTax = roundTo2(target.computedTotalTax + row.computedTotalTax);
-    target.lineCount += 1;
+    target.computedCESS = target.cess;
+    target.computedTotalTax = roundTo2(target.igst + target.cgst + target.sgst + target.cess);
+    target.sourceRowCount += 1;
+    target.sourceRows.push(row.sourceIndex);
+
     if (!target.supplierName && row.supplierName) target.supplierName = row.supplierName;
-    if ((!target.invoiceDate || row.invoiceDate < target.invoiceDate) && row.invoiceDate) {
-      target.invoiceDate = row.invoiceDate;
-      target.invoiceMonth = row.invoiceMonth;
-    }
+    if ((!target.invoiceDate || row.invoiceDate < target.invoiceDate) && row.invoiceDate) target.invoiceDate = row.invoiceDate;
+
+    bySourceIndex.set(row.sourceIndex, baseKey);
   });
 
-  return aggregated.concat(Array.from(invoiceMap.values()));
+  return { grouped, bySourceIndex };
 }
 
 function reconcile() {
   syncSettingsFromUi();
 
-  const prRows = aggregateRows(state.rawBooks.map((row, idx) => normalizeRow(row, state.mappedBooks, idx, "PR")));
-  const twoBRows = aggregateRows(state.raw2b.map((row, idx) => normalizeRow(row, state.mapped2b, idx, "2B")));
+  const prOriginalRows = state.rawBooks.map((row, idx) => normalizeRow(row, state.mappedBooks, idx, "PR"));
+  const twoBOriginalRows = state.raw2b.map((row, idx) => normalizeRow(row, state.mapped2b, idx, "2B"));
 
-  const twoBByKey = new Map(twoBRows.map((row) => [row.canonicalKey, row]));
+  const prAggregation = aggregateRowsByInvoice(prOriginalRows);
+  const twoBAggregation = aggregateRowsByInvoice(twoBOriginalRows);
+  const prGrouped = prAggregation.grouped;
+  const twoBGrouped = twoBAggregation.grouped;
+
+  const invoiceOutcomeByKeyPR = new Map();
+  const invoiceOutcomeByKey2B = new Map();
   const matchedKeys = new Set();
 
   const matched = [];
@@ -263,37 +293,51 @@ function reconcile() {
   const notIn2B = [];
   const notInPR = [];
 
-  const prExportRows = [];
-  const twoBExportRows = [];
+  Array.from(prGrouped.values()).forEach((prInvoice) => {
+    const key = prInvoice.aggregationKey;
+    const twoBInvoice = key && !key.startsWith("NO_KEY||") ? twoBGrouped.get(key) : null;
 
-  prRows.forEach((prRow) => {
-    const twoBRow = twoBByKey.get(prRow.canonicalKey);
-    if (!twoBRow || prRow.canonicalKey.startsWith("NOINV||")) {
-      const row = toDisplayRow(prRow, REMARKS.NOT_IN_2B);
-      notIn2B.push(row);
-      prExportRows.push(row);
+    if (!twoBInvoice) {
+      const outcome = buildInvoiceOutcome(prInvoice, REMARKS.NOT_IN_2B);
+      invoiceOutcomeByKeyPR.set(key, outcome);
+      notIn2B.push(toDisplayRow(outcome));
       return;
     }
 
-    matchedKeys.add(prRow.canonicalKey);
-    const taxableDiff = Math.abs(roundTo2(prRow.taxableValue - twoBRow.taxableValue));
-    const taxDiff = Math.abs(roundTo2(prRow.computedTotalTax - twoBRow.computedTotalTax));
-    const remark = taxableDiff <= state.settings.taxableTolerance && taxDiff <= state.settings.taxTolerance ? REMARKS.MATCHED : REMARKS.VALUE_DIFFERENCE;
+    matchedKeys.add(key);
+    const taxableDiff = roundTo2(prInvoice.taxableValue - twoBInvoice.taxableValue);
+    const taxDiff = roundTo2(prInvoice.computedTotalTax - twoBInvoice.computedTotalTax);
+    const cessDiff = roundTo2(prInvoice.cess - twoBInvoice.cess);
+    const remark = Math.abs(taxableDiff) <= state.settings.taxableTolerance && Math.abs(taxDiff) <= state.settings.taxTolerance ? REMARKS.MATCHED : REMARKS.VALUE_DIFFERENCE;
 
-    const prDisplay = toDisplayRow(prRow, remark);
-    const twoBDisplay = toDisplayRow(twoBRow, remark);
-    if (remark === REMARKS.MATCHED) matched.push(prDisplay);
-    else valueDifference.push(prDisplay);
-    prExportRows.push(prDisplay);
-    twoBExportRows.push(twoBDisplay);
+    const prOutcome = buildInvoiceOutcome(prInvoice, remark, taxableDiff, taxDiff, cessDiff);
+    const twoBOutcome = buildInvoiceOutcome(twoBInvoice, remark, taxableDiff, taxDiff, cessDiff);
+    invoiceOutcomeByKeyPR.set(key, prOutcome);
+    invoiceOutcomeByKey2B.set(key, twoBOutcome);
+
+    if (remark === REMARKS.MATCHED) matched.push(toDisplayRow(prOutcome));
+    else valueDifference.push(toDisplayRow(prOutcome));
   });
 
-  twoBRows.forEach((twoBRow) => {
-    if (twoBRow.canonicalKey.startsWith("NOINV||") || !matchedKeys.has(twoBRow.canonicalKey)) {
-      const row = toDisplayRow(twoBRow, REMARKS.NOT_IN_PR);
-      notInPR.push(row);
-      twoBExportRows.push(row);
+  Array.from(twoBGrouped.values()).forEach((twoBInvoice) => {
+    const key = twoBInvoice.aggregationKey;
+    if (key.startsWith("NO_KEY||") || !matchedKeys.has(key)) {
+      const outcome = buildInvoiceOutcome(twoBInvoice, REMARKS.NOT_IN_PR);
+      invoiceOutcomeByKey2B.set(key, outcome);
+      notInPR.push(toDisplayRow(outcome));
     }
+  });
+
+  const prExportRows = prOriginalRows.map((row) => {
+    const key = prAggregation.bySourceIndex.get(row.sourceIndex) || row.aggregationKey;
+    const invoiceOutcome = invoiceOutcomeByKeyPR.get(key) || buildInvoiceOutcome(row, REMARKS.NOT_IN_2B);
+    return toDisplayRow(invoiceOutcome, row);
+  });
+
+  const twoBExportRows = twoBOriginalRows.map((row) => {
+    const key = twoBAggregation.bySourceIndex.get(row.sourceIndex) || row.aggregationKey;
+    const invoiceOutcome = invoiceOutcomeByKey2B.get(key) || buildInvoiceOutcome(row, REMARKS.NOT_IN_PR);
+    return toDisplayRow(invoiceOutcome, row);
   });
 
   state.results = {
@@ -301,12 +345,12 @@ function reconcile() {
     "Value Difference": valueDifference.sort(compareBusinessExportRows),
     "Not in 2B": notIn2B.sort(compareBusinessExportRows),
     "Not in PR": notInPR.sort(compareBusinessExportRows),
-    PurchaseRegisterExport: prExportRows.sort(compareBusinessExportRows),
-    GSTR2BExport: twoBExportRows.sort(compareBusinessExportRows),
+    PurchaseRegisterExport: prExportRows,
+    GSTR2BExport: twoBExportRows,
   };
 
-  document.getElementById("totalBooks").textContent = String(prRows.length);
-  document.getElementById("total2b").textContent = String(twoBRows.length);
+  document.getElementById("totalBooks").textContent = String(prGrouped.size);
+  document.getElementById("total2b").textContent = String(twoBGrouped.size);
   document.getElementById("matchedCount").textContent = String(matched.length);
   document.getElementById("missing2bCount").textContent = String(notIn2B.length);
   document.getElementById("missingBooksCount").textContent = String(notInPR.length);
@@ -319,19 +363,49 @@ function reconcile() {
   export2bBtn.disabled = false;
 }
 
-function toDisplayRow(baseRow, remark) {
+function buildInvoiceOutcome(invoiceRow, remark, taxableDiff = "", taxDiff = "", cessDiff = "") {
+  const showDiffs = remark === REMARKS.VALUE_DIFFERENCE;
   return {
-    GSTIN: baseRow?.gstin || "",
-    SupplierName: baseRow?.supplierName || "",
-    InvoiceNo: baseRow?.invoiceNo || "",
-    InvoiceDate: baseRow?.invoiceDate || "",
-    TaxableValue: baseRow?.taxableValue ?? "",
-    IGST: baseRow?.igst ?? "",
-    CGST: baseRow?.cgst ?? "",
-    SGST: baseRow?.sgst ?? "",
-    CESS: baseRow?.cess ?? 0,
-    ComputedTotalTax: baseRow?.computedTotalTax ?? 0,
-    Remark: remark,
+    gstin: invoiceRow?.gstin || "",
+    supplierName: invoiceRow?.supplierName || "",
+    invoiceNo: invoiceRow?.invoiceNo || "",
+    invoiceDate: invoiceRow?.invoiceDate || "",
+    taxableValue: invoiceRow?.taxableValue ?? 0,
+    igst: invoiceRow?.igst ?? 0,
+    cgst: invoiceRow?.cgst ?? 0,
+    sgst: invoiceRow?.sgst ?? 0,
+    cess: invoiceRow?.cess ?? 0,
+    computedCESS: invoiceRow?.computedCESS ?? invoiceRow?.cess ?? 0,
+    computedTotalTax: invoiceRow?.computedTotalTax ?? 0,
+    taxableDiff: showDiffs ? taxableDiff : "",
+    taxDiff: showDiffs ? taxDiff : "",
+    cessDiff: showDiffs ? cessDiff : "",
+    aggregationKey: invoiceRow?.aggregationKey || "",
+    sourceRowCount: invoiceRow?.sourceRowCount ?? 1,
+    remark,
+  };
+}
+
+function toDisplayRow(invoiceOutcome, originalRow = null) {
+  const rowBase = originalRow || invoiceOutcome;
+  return {
+    GSTIN: rowBase?.gstin || invoiceOutcome?.gstin || "",
+    SupplierName: rowBase?.supplierName || invoiceOutcome?.supplierName || "",
+    InvoiceNo: rowBase?.invoiceNo || invoiceOutcome?.invoiceNo || "",
+    InvoiceDate: rowBase?.invoiceDate || invoiceOutcome?.invoiceDate || "",
+    TaxableValue: rowBase?.taxableValue ?? invoiceOutcome?.taxableValue ?? "",
+    IGST: rowBase?.igst ?? invoiceOutcome?.igst ?? "",
+    CGST: rowBase?.cgst ?? invoiceOutcome?.cgst ?? "",
+    SGST: rowBase?.sgst ?? invoiceOutcome?.sgst ?? "",
+    CESS: rowBase?.cess ?? invoiceOutcome?.cess ?? 0,
+    ComputedCESS: rowBase?.computedCESS ?? rowBase?.cess ?? invoiceOutcome?.computedCESS ?? 0,
+    ComputedTotalTax: rowBase?.computedTotalTax ?? invoiceOutcome?.computedTotalTax ?? 0,
+    TaxableDiff: invoiceOutcome?.taxableDiff ?? "",
+    TaxDiff: invoiceOutcome?.taxDiff ?? "",
+    CessDiff: invoiceOutcome?.cessDiff ?? "",
+    AggregationKey: invoiceOutcome?.aggregationKey || rowBase?.aggregationKey || "",
+    SourceRowCount: invoiceOutcome?.sourceRowCount ?? 1,
+    Remark: invoiceOutcome?.remark || "",
   };
 }
 
@@ -376,7 +450,7 @@ function getColumnClass(col, isHeader) {
   const lower = String(col).toLowerCase();
   const classes = [];
   if (lower.includes("date")) classes.push("col-date");
-  if (["taxablevalue", "igst", "cgst", "sgst", "cess", "computedtotaltax"].includes(lower.replace(/[^a-z0-9]/g, ""))) classes.push("col-num");
+  if (["taxablevalue", "igst", "cgst", "sgst", "cess", "computedcess", "computedtotaltax", "taxablediff", "taxdiff", "cessdiff", "sourcerowcount"].includes(lower.replace(/[^a-z0-9]/g, ""))) classes.push("col-num");
   if (lower.includes("supplier")) classes.push("col-supplier");
   if (lower.includes("invoice") && lower.includes("no")) classes.push("col-invoice");
   if (isHeader) classes.push("col-head");
@@ -414,14 +488,20 @@ function formatExportRow(row) {
     CGST: row.CGST ?? "",
     SGST: row.SGST ?? "",
     CESS: row.CESS ?? 0,
+    ComputedCESS: row.ComputedCESS ?? 0,
     ComputedTotalTax: row.ComputedTotalTax ?? 0,
+    TaxableDiff: row.TaxableDiff ?? "",
+    TaxDiff: row.TaxDiff ?? "",
+    CessDiff: row.CessDiff ?? "",
+    AggregationKey: row.AggregationKey || "",
+    SourceRowCount: row.SourceRowCount ?? 1,
     Remark: sanitizeRemark(row.Remark),
   };
 }
 
 function createEmptyExportRow() {
   return EXPORT_COLUMNS.reduce((acc, col) => {
-    acc[col] = ["CESS", "ComputedTotalTax"].includes(col) ? 0 : "";
+    acc[col] = ["CESS", "ComputedCESS", "ComputedTotalTax", "SourceRowCount"].includes(col) ? 0 : "";
     return acc;
   }, {});
 }
@@ -440,9 +520,13 @@ function getTodayStamp() {
 }
 
 function applyWorksheetTemplate(sheet, rowCount) {
-  sheet["!autofilter"] = { ref: `A1:K1` };
+  const lastCol = XLSX.utils.encode_col(EXPORT_COLUMNS.length - 1);
+  sheet["!autofilter"] = { ref: `A1:${lastCol}1` };
   sheet["!freeze"] = { xSplit: 0, ySplit: 1, topLeftCell: "A2", activePane: "bottomLeft", state: "frozen" };
-  sheet["!cols"] = [{ wch: 16 }, { wch: 32 }, { wch: 18 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 16 }, { wch: 18 }];
+  sheet["!cols"] = [
+    { wch: 16 }, { wch: 32 }, { wch: 18 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
+    { wch: 14 }, { wch: 16 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 24 }, { wch: 12 }, { wch: 18 },
+  ];
 
   const headerStyle = {
     font: { bold: true, color: { rgb: "1F2937" } },
@@ -456,14 +540,14 @@ function applyWorksheetTemplate(sheet, rowCount) {
   }
 
   for (let r = 1; r < rowCount; r += 1) {
-    [4, 5, 6, 7, 8, 9].forEach((c) => {
+    [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15].forEach((c) => {
       const ref = XLSX.utils.encode_cell({ r, c });
       if (sheet[ref]) sheet[ref].s = { alignment: { horizontal: "right", vertical: "center" } };
     });
     const dateRef = XLSX.utils.encode_cell({ r, c: 3 });
     if (sheet[dateRef]) sheet[dateRef].s = { alignment: { horizontal: "center", vertical: "center" } };
 
-    const remarkRef = XLSX.utils.encode_cell({ r, c: 10 });
+    const remarkRef = XLSX.utils.encode_cell({ r, c: EXPORT_COLUMNS.length - 1 });
     if (sheet[remarkRef]) sheet[remarkRef].s = { fill: { fgColor: { rgb: getRemarkFill(sheet[remarkRef].v) } }, alignment: { horizontal: "center", vertical: "center" } };
   }
 }
@@ -523,7 +607,7 @@ function normalizeDate(value) {
 function normalizeInvoiceNo(value) {
   return normalizeText(value)
     .toUpperCase()
-    .replace(/[\s/_-]+/g, "")
+    .replace(/[\s\/-]+/g, "")
     .replace(/[^A-Z0-9]/g, "");
 }
 
@@ -559,23 +643,23 @@ function toNumber(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
-function computeTotalTax(row) {
-  return roundTo2(toNumber(row.igst) + toNumber(row.cgst) + toNumber(row.sgst) + toNumber(row.cess));
+function computeTotalTax(values) {
+  return (values.igst || 0) + (values.cgst || 0) + (values.sgst || 0) + (values.cess || 0);
 }
 
 function roundTo2(value) {
   return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 }
 
-function pad2(n) {
-  return String(n).padStart(2, "0");
+function pad2(value) {
+  return String(value).padStart(2, "0");
 }
 
-function escapeHtml(text) {
-  return String(text)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
