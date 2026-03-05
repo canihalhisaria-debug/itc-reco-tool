@@ -314,7 +314,7 @@ function reconcile() {
     twoBGroupsByGstin.get(twoBGroup.gstin).push(twoBGroup);
   });
 
-  // Pass A: Strict matching by GSTIN + normalized invoice number.
+  // STEP 1: Primary invoice-based match on GSTIN + normalized invoice number.
   Array.from(prGrouped.values()).forEach((prGroup) => {
     const key = prGroup.aggregationKey;
     const twoBGroup = key && !key.startsWith("NO_KEY||") ? twoBGrouped.get(key) : null;
@@ -326,12 +326,10 @@ function reconcile() {
 
     matched2BKeys.add(key);
 
-    const taxableDiff = roundTo2(prGroup.taxableValue - twoBGroup.taxableValue);
-    const taxDiff = roundTo2(prGroup.computedTotalTax - twoBGroup.computedTotalTax);
-    const cessDiff = roundTo2(prGroup.cess - twoBGroup.cess);
-    const remark = Math.abs(taxableDiff) <= state.settings.taxableTolerance && Math.abs(taxDiff) <= state.settings.taxTolerance ? REMARKS.MATCHED : REMARKS.VALUE_DIFFERENCE;
+    const amountsDiff = calculateAmountDiffs(prGroup, twoBGroup);
+    const remark = amountsMatchWithinTolerance(amountsDiff, state.settings) ? REMARKS.MATCHED : REMARKS.VALUE_DIFFERENCE;
 
-    const prOutcome = buildInvoiceOutcome(prGroup, remark, taxableDiff, taxDiff, cessDiff);
+    const prOutcome = buildInvoiceOutcome(prGroup, remark, amountsDiff);
     if (remark === REMARKS.MATCHED) matched.push(toDisplayRow(prOutcome));
     else valueDifference.push(toDisplayRow(prOutcome));
 
@@ -339,31 +337,21 @@ function reconcile() {
     twoBGroup.sourceRowIdxs.forEach((idx) => remarkBy2BRowIdx.set(idx, remark));
   });
 
-  // Pass B: Fallback matching by GSTIN and amount tolerance for invoice mismatch.
+  // STEP 2: If STEP 1 key is not found, fallback to same GSTIN and amount-only matching.
   unmatchedPrGroups.forEach((prGroup) => {
     const candidates = (twoBGroupsByGstin.get(prGroup.gstin) || [])
       .filter((twoBGroup) => !matched2BKeys.has(twoBGroup.aggregationKey))
       .map((twoBGroup) => {
-        const taxableDiff = roundTo2(prGroup.taxableValue - twoBGroup.taxableValue);
-        const taxDiff = roundTo2(prGroup.computedTotalTax - twoBGroup.computedTotalTax);
-        const cessDiff = roundTo2(prGroup.cess - twoBGroup.cess);
-        const taxableWithin = Math.abs(taxableDiff) <= state.settings.taxableTolerance;
-        const taxWithin = Math.abs(taxDiff) <= state.settings.taxTolerance;
-        if (!taxableWithin || !taxWithin) return null;
+        const amountsDiff = calculateAmountDiffs(prGroup, twoBGroup);
+        if (!amountsMatchWithinTolerance(amountsDiff, state.settings)) return null;
 
         return {
           twoBGroup,
-          taxableDiff,
-          taxDiff,
-          cessDiff,
-          invoiceSimilarity: levenshteinSimilarity(prGroup.invoiceNo, twoBGroup.invoiceNo),
-          diffMagnitude: roundTo2(Math.abs(taxableDiff) + Math.abs(taxDiff)),
+          amountsDiff,
         };
       })
       .filter(Boolean)
       .sort((a, b) => {
-        if (b.invoiceSimilarity !== a.invoiceSimilarity) return b.invoiceSimilarity - a.invoiceSimilarity;
-        if (a.diffMagnitude !== b.diffMagnitude) return a.diffMagnitude - b.diffMagnitude;
         return a.twoBGroup.aggregationKey.localeCompare(b.twoBGroup.aggregationKey);
       });
 
@@ -376,8 +364,8 @@ function reconcile() {
     }
 
     matched2BKeys.add(winner.twoBGroup.aggregationKey);
-    const outcome = buildInvoiceOutcome(prGroup, REMARKS.MATCHED, winner.taxableDiff, winner.taxDiff, winner.cessDiff);
-    matched.push(toDisplayRow({ ...outcome, invoiceMismatch: true }));
+    const outcome = buildInvoiceOutcome(prGroup, REMARKS.MATCHED, winner.amountsDiff);
+    matched.push(toDisplayRow(outcome));
 
     prGroup.sourceRowIdxs.forEach((idx) => remarkByPrRowIdx.set(idx, REMARKS.MATCHED));
     winner.twoBGroup.sourceRowIdxs.forEach((idx) => remarkBy2BRowIdx.set(idx, REMARKS.MATCHED));
@@ -441,7 +429,7 @@ function reconcile() {
   export2bBtn.disabled = false;
 }
 
-function buildInvoiceOutcome(invoiceRow, remark, taxableDiff = "", taxDiff = "", cessDiff = "") {
+function buildInvoiceOutcome(invoiceRow, remark, amountDiffs = null) {
   return {
     gstin: invoiceRow?.gstin || "",
     supplierName: invoiceRow?.supplierName || "",
@@ -452,11 +440,29 @@ function buildInvoiceOutcome(invoiceRow, remark, taxableDiff = "", taxDiff = "",
     cgst: invoiceRow?.cgst ?? 0,
     sgst: invoiceRow?.sgst ?? 0,
     cess: invoiceRow?.cess ?? 0,
-    taxableDiff,
-    taxDiff,
-    cessDiff,
+    amountDiffs,
     remark,
   };
+}
+
+function calculateAmountDiffs(prGroup, twoBGroup) {
+  return {
+    taxableValue: roundTo2(prGroup.taxableValue - twoBGroup.taxableValue),
+    igst: roundTo2(prGroup.igst - twoBGroup.igst),
+    cgst: roundTo2(prGroup.cgst - twoBGroup.cgst),
+    sgst: roundTo2(prGroup.sgst - twoBGroup.sgst),
+    cess: roundTo2(prGroup.cess - twoBGroup.cess),
+  };
+}
+
+function amountsMatchWithinTolerance(amountDiffs, settings) {
+  return (
+    Math.abs(amountDiffs.taxableValue) <= settings.taxableTolerance &&
+    Math.abs(amountDiffs.igst) <= settings.taxTolerance &&
+    Math.abs(amountDiffs.cgst) <= settings.taxTolerance &&
+    Math.abs(amountDiffs.sgst) <= settings.taxTolerance &&
+    Math.abs(amountDiffs.cess) <= settings.taxTolerance
+  );
 }
 
 function toDisplayRow(invoiceOutcome, originalRow = null) {
