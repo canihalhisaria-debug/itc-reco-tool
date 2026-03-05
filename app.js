@@ -15,6 +15,7 @@ const DEFAULT_SETTINGS = {
   taxableTolerance: 1,
   taxTolerance: 1,
   invoiceLevelAggregate: true,
+  invoiceOcrCorrection: true,
 };
 
 const REMARKS = {
@@ -75,6 +76,7 @@ const export2bBtn = document.getElementById("export2bBtn");
 const taxableToleranceInput = document.getElementById("taxableTolerance");
 const taxToleranceInput = document.getElementById("taxTolerance");
 const invoiceLevelAggregateInput = document.getElementById("invoiceLevelAggregate");
+const invoiceOcrCorrectionInput = document.getElementById("invoiceOcrCorrection");
 const resultSearchInput = document.getElementById("resultSearch");
 
 file2bInput.addEventListener("change", (e) => handleFile(e.target.files[0], "2b"));
@@ -90,6 +92,10 @@ export2bBtn.addEventListener("click", () => exportDataset("2B"));
 
 if (invoiceLevelAggregateInput) {
   invoiceLevelAggregateInput.addEventListener("change", syncSettingsFromUi);
+}
+
+if (invoiceOcrCorrectionInput) {
+  invoiceOcrCorrectionInput.addEventListener("change", syncSettingsFromUi);
 }
 
 resultSearchInput.addEventListener("input", () => {
@@ -174,12 +180,14 @@ function syncSettingsToUi() {
   taxableToleranceInput.value = String(state.settings.taxableTolerance);
   taxToleranceInput.value = String(state.settings.taxTolerance);
   if (invoiceLevelAggregateInput) invoiceLevelAggregateInput.checked = Boolean(state.settings.invoiceLevelAggregate);
+  if (invoiceOcrCorrectionInput) invoiceOcrCorrectionInput.checked = Boolean(state.settings.invoiceOcrCorrection);
 }
 
 function syncSettingsFromUi() {
   state.settings.taxableTolerance = toNumber(taxableToleranceInput.value);
   state.settings.taxTolerance = toNumber(taxToleranceInput.value);
   if (invoiceLevelAggregateInput) state.settings.invoiceLevelAggregate = invoiceLevelAggregateInput.checked;
+  if (invoiceOcrCorrectionInput) state.settings.invoiceOcrCorrection = invoiceOcrCorrectionInput.checked;
 }
 
 function normalizeRow(row, mapping, sourceIndex, sourceType) {
@@ -193,7 +201,7 @@ function normalizeRow(row, mapping, sourceIndex, sourceType) {
   const computedTotalTax = roundTo2(computeTotalTax({ igst, cgst, sgst, cess }));
   const gstin = normalizeGSTIN(getMapped(row, mapping, "GSTIN"));
   const invoiceNoRaw = normalizeText(getMapped(row, mapping, "Invoice No"));
-  const invoiceNoNorm = normalizeInvoiceNo(invoiceNoRaw);
+  const invoiceNoNorm = normalizeInvoiceNo(invoiceNoRaw, state.settings.invoiceOcrCorrection);
 
   return {
     sourceType,
@@ -237,6 +245,7 @@ function aggregateRowsByInvoice(rows) {
         gstin: row.gstin,
         supplierName: row.supplierName,
         invoiceNo: row.invoiceNo,
+        invoiceNoNorm: row.invoiceNoNorm,
         invoiceDate: row.invoiceDate || "",
         taxableValue: 0,
         igst: 0,
@@ -290,67 +299,95 @@ function reconcile() {
 
   const remarkByPrRowIdx = new Map();
   const remarkBy2BRowIdx = new Map();
-  const twoBGroupRemarkByKey = new Map();
   const matched2BKeys = new Set();
 
   const matched = [];
   const valueDifference = [];
   const notIn2B = [];
   const notInPR = [];
+  const unmatchedPrGroups = [];
 
-  prRowsForMatching.forEach((prRow) => {
-    const key = prRow.aggregationKey;
-    const twoBInvoice = key && !key.startsWith("NO_KEY||") ? twoBGrouped.get(key) : null;
+  const twoBGroupsByGstin = new Map();
+  Array.from(twoBGrouped.values()).forEach((twoBGroup) => {
+    if (!twoBGroup.gstin) return;
+    if (!twoBGroupsByGstin.has(twoBGroup.gstin)) twoBGroupsByGstin.set(twoBGroup.gstin, []);
+    twoBGroupsByGstin.get(twoBGroup.gstin).push(twoBGroup);
+  });
 
-    if (!twoBInvoice) {
-      remarkByPrRowIdx.set(prRow.sourceIndex, REMARKS.NOT_IN_2B);
+  // Pass A: Strict matching by GSTIN + normalized invoice number.
+  Array.from(prGrouped.values()).forEach((prGroup) => {
+    const key = prGroup.aggregationKey;
+    const twoBGroup = key && !key.startsWith("NO_KEY||") ? twoBGrouped.get(key) : null;
+
+    if (!twoBGroup) {
+      unmatchedPrGroups.push(prGroup);
       return;
     }
 
     matched2BKeys.add(key);
-    const taxableDiff = roundTo2(prRow.taxableValue - twoBInvoice.taxableValue);
-    const taxDiff = roundTo2(prRow.computedTotalTax - twoBInvoice.computedTotalTax);
+
+    const taxableDiff = roundTo2(prGroup.taxableValue - twoBGroup.taxableValue);
+    const taxDiff = roundTo2(prGroup.computedTotalTax - twoBGroup.computedTotalTax);
+    const cessDiff = roundTo2(prGroup.cess - twoBGroup.cess);
     const remark = Math.abs(taxableDiff) <= state.settings.taxableTolerance && Math.abs(taxDiff) <= state.settings.taxTolerance ? REMARKS.MATCHED : REMARKS.VALUE_DIFFERENCE;
 
-    remarkByPrRowIdx.set(prRow.sourceIndex, remark);
-    const existingGroupRemark = twoBGroupRemarkByKey.get(key);
-    if (!existingGroupRemark || existingGroupRemark === REMARKS.MATCHED) {
-      twoBGroupRemarkByKey.set(key, remark);
-    }
+    const prOutcome = buildInvoiceOutcome(prGroup, remark, taxableDiff, taxDiff, cessDiff);
+    if (remark === REMARKS.MATCHED) matched.push(toDisplayRow(prOutcome));
+    else valueDifference.push(toDisplayRow(prOutcome));
+
+    prGroup.sourceRowIdxs.forEach((idx) => remarkByPrRowIdx.set(idx, remark));
+    twoBGroup.sourceRowIdxs.forEach((idx) => remarkBy2BRowIdx.set(idx, remark));
   });
 
-  twoBGroupRemarkByKey.forEach((remark, key) => {
-    const twoBInvoice = twoBGrouped.get(key);
-    if (!twoBInvoice) return;
-    twoBInvoice.sourceRowIdxs.forEach((idx) => remarkBy2BRowIdx.set(idx, remark));
-  });
+  // Pass B: Fallback matching by GSTIN and amount tolerance for invoice mismatch.
+  unmatchedPrGroups.forEach((prGroup) => {
+    const candidates = (twoBGroupsByGstin.get(prGroup.gstin) || [])
+      .filter((twoBGroup) => !matched2BKeys.has(twoBGroup.aggregationKey))
+      .map((twoBGroup) => {
+        const taxableDiff = roundTo2(prGroup.taxableValue - twoBGroup.taxableValue);
+        const taxDiff = roundTo2(prGroup.computedTotalTax - twoBGroup.computedTotalTax);
+        const cessDiff = roundTo2(prGroup.cess - twoBGroup.cess);
+        const taxableWithin = Math.abs(taxableDiff) <= state.settings.taxableTolerance;
+        const taxWithin = Math.abs(taxDiff) <= state.settings.taxTolerance;
+        if (!taxableWithin || !taxWithin) return null;
 
-  Array.from(prGrouped.values()).forEach((prInvoice) => {
-    const key = prInvoice.aggregationKey;
-    const twoBInvoice = key && !key.startsWith("NO_KEY||") ? twoBGrouped.get(key) : null;
+        return {
+          twoBGroup,
+          taxableDiff,
+          taxDiff,
+          cessDiff,
+          invoiceSimilarity: levenshteinSimilarity(prGroup.invoiceNo, twoBGroup.invoiceNo),
+          diffMagnitude: roundTo2(Math.abs(taxableDiff) + Math.abs(taxDiff)),
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => {
+        if (b.invoiceSimilarity !== a.invoiceSimilarity) return b.invoiceSimilarity - a.invoiceSimilarity;
+        if (a.diffMagnitude !== b.diffMagnitude) return a.diffMagnitude - b.diffMagnitude;
+        return a.twoBGroup.aggregationKey.localeCompare(b.twoBGroup.aggregationKey);
+      });
 
-    if (!twoBInvoice) {
-      const outcome = buildInvoiceOutcome(prInvoice, REMARKS.NOT_IN_2B);
+    const winner = candidates[0];
+    if (!winner) {
+      const outcome = buildInvoiceOutcome(prGroup, REMARKS.NOT_IN_2B);
       notIn2B.push(toDisplayRow(outcome));
+      prGroup.sourceRowIdxs.forEach((idx) => remarkByPrRowIdx.set(idx, REMARKS.NOT_IN_2B));
       return;
     }
 
-    const taxableDiff = roundTo2(prInvoice.taxableValue - twoBInvoice.taxableValue);
-    const taxDiff = roundTo2(prInvoice.computedTotalTax - twoBInvoice.computedTotalTax);
-    const cessDiff = roundTo2(prInvoice.cess - twoBInvoice.cess);
-    const remark = Math.abs(taxableDiff) <= state.settings.taxableTolerance && Math.abs(taxDiff) <= state.settings.taxTolerance ? REMARKS.MATCHED : REMARKS.VALUE_DIFFERENCE;
+    matched2BKeys.add(winner.twoBGroup.aggregationKey);
+    const outcome = buildInvoiceOutcome(prGroup, REMARKS.MATCHED, winner.taxableDiff, winner.taxDiff, winner.cessDiff);
+    matched.push(toDisplayRow({ ...outcome, invoiceMismatch: true }));
 
-    const prOutcome = buildInvoiceOutcome(prInvoice, remark, taxableDiff, taxDiff, cessDiff);
-
-    if (remark === REMARKS.MATCHED) matched.push(toDisplayRow(prOutcome));
-    else valueDifference.push(toDisplayRow(prOutcome));
+    prGroup.sourceRowIdxs.forEach((idx) => remarkByPrRowIdx.set(idx, REMARKS.MATCHED));
+    winner.twoBGroup.sourceRowIdxs.forEach((idx) => remarkBy2BRowIdx.set(idx, REMARKS.MATCHED));
   });
 
-  Array.from(twoBGrouped.values()).forEach((twoBInvoice) => {
-    const key = twoBInvoice.aggregationKey;
+  Array.from(twoBGrouped.values()).forEach((twoBGroup) => {
+    const key = twoBGroup.aggregationKey;
     if (key.startsWith("NO_KEY||") || !matched2BKeys.has(key)) {
-      const outcome = buildInvoiceOutcome(twoBInvoice, REMARKS.NOT_IN_PR);
-      twoBInvoice.sourceRowIdxs.forEach((idx) => remarkBy2BRowIdx.set(idx, REMARKS.NOT_IN_PR));
+      const outcome = buildInvoiceOutcome(twoBGroup, REMARKS.NOT_IN_PR);
+      twoBGroup.sourceRowIdxs.forEach((idx) => remarkBy2BRowIdx.set(idx, REMARKS.NOT_IN_PR));
       notInPR.push(toDisplayRow(outcome));
     }
   });
@@ -699,11 +736,56 @@ function normalizeDate(value) {
   return "";
 }
 
-function normalizeInvoiceNo(value) {
-  return normalizeText(value)
+function normalizeInvoiceNo(value, applyOcrCorrection = true) {
+  let invoice = normalizeText(value)
     .toUpperCase()
-    .replace(/[\s\/-]+/g, "")
+    .replace(/[\s\/_-]+/g, "")
     .replace(/[^A-Z0-9]/g, "");
+
+  if (applyOcrCorrection) {
+    invoice = invoice.replace(/[OIL]/g, (char) => {
+      if (char === "O") return "0";
+      return "1";
+    });
+  }
+
+  return invoice;
+}
+
+function levenshteinSimilarity(a, b) {
+  const x = normalizeText(a).toUpperCase();
+  const y = normalizeText(b).toUpperCase();
+  if (!x && !y) return 1;
+  const distance = levenshteinDistance(x, y);
+  const maxLen = Math.max(x.length, y.length);
+  if (!maxLen) return 1;
+  return (maxLen - distance) / maxLen;
+}
+
+function levenshteinDistance(a, b) {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+
+  const prev = new Array(b.length + 1);
+  const curr = new Array(b.length + 1);
+
+  for (let j = 0; j <= b.length; j += 1) prev[j] = j;
+
+  for (let i = 1; i <= a.length; i += 1) {
+    curr[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(
+        prev[j] + 1,
+        curr[j - 1] + 1,
+        prev[j - 1] + cost
+      );
+    }
+    for (let j = 0; j <= b.length; j += 1) prev[j] = curr[j];
+  }
+
+  return prev[b.length];
 }
 
 function normalizeGSTIN(value) {
