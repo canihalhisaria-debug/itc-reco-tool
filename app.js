@@ -273,9 +273,16 @@ function aggregateRowsByInvoice(rows) {
 function reconcile() {
   syncSettingsFromUi();
 
-  const prRowsForMatching = state.rawBooks.map((row, idx) => normalizeRow(row, state.mappedBooks, idx, "PR"));
-  const twoBRowsForMatching = state.raw2b.map((row, idx) => normalizeRow(row, state.mapped2b, idx, "2B"));
+  const rawPRRows = state.rawBooks;
+  const raw2BRows = state.raw2b;
 
+  const prRowsForMatching = rawPRRows.map((row, idx) => normalizeRow(row, state.mappedBooks, idx, "PR"));
+  const twoBRowsForMatching = raw2BRows.map((row, idx) => normalizeRow(row, state.mapped2b, idx, "2B"));
+
+  const prRawTotalsBefore = calculateTotals(prRowsForMatching);
+  const twoBRawTotalsBefore = calculateTotals(twoBRowsForMatching);
+
+  // Aggregation is only used for key-based matching, not for export output.
   const prAggregation = aggregateRowsByInvoice(prRowsForMatching);
   const twoBAggregation = aggregateRowsByInvoice(twoBRowsForMatching);
   const prGrouped = prAggregation.grouped;
@@ -283,12 +290,40 @@ function reconcile() {
 
   const remarkByPrRowIdx = new Map();
   const remarkBy2BRowIdx = new Map();
-  const matchedKeys = new Set();
+  const twoBGroupRemarkByKey = new Map();
+  const matched2BKeys = new Set();
 
   const matched = [];
   const valueDifference = [];
   const notIn2B = [];
   const notInPR = [];
+
+  prRowsForMatching.forEach((prRow) => {
+    const key = prRow.aggregationKey;
+    const twoBInvoice = key && !key.startsWith("NO_KEY||") ? twoBGrouped.get(key) : null;
+
+    if (!twoBInvoice) {
+      remarkByPrRowIdx.set(prRow.sourceIndex, REMARKS.NOT_IN_2B);
+      return;
+    }
+
+    matched2BKeys.add(key);
+    const taxableDiff = roundTo2(prRow.taxableValue - twoBInvoice.taxableValue);
+    const taxDiff = roundTo2(prRow.computedTotalTax - twoBInvoice.computedTotalTax);
+    const remark = Math.abs(taxableDiff) <= state.settings.taxableTolerance && Math.abs(taxDiff) <= state.settings.taxTolerance ? REMARKS.MATCHED : REMARKS.VALUE_DIFFERENCE;
+
+    remarkByPrRowIdx.set(prRow.sourceIndex, remark);
+    const existingGroupRemark = twoBGroupRemarkByKey.get(key);
+    if (!existingGroupRemark || existingGroupRemark === REMARKS.MATCHED) {
+      twoBGroupRemarkByKey.set(key, remark);
+    }
+  });
+
+  twoBGroupRemarkByKey.forEach((remark, key) => {
+    const twoBInvoice = twoBGrouped.get(key);
+    if (!twoBInvoice) return;
+    twoBInvoice.sourceRowIdxs.forEach((idx) => remarkBy2BRowIdx.set(idx, remark));
+  });
 
   Array.from(prGrouped.values()).forEach((prInvoice) => {
     const key = prInvoice.aggregationKey;
@@ -296,20 +331,16 @@ function reconcile() {
 
     if (!twoBInvoice) {
       const outcome = buildInvoiceOutcome(prInvoice, REMARKS.NOT_IN_2B);
-      prInvoice.sourceRowIdxs.forEach((idx) => remarkByPrRowIdx.set(idx, REMARKS.NOT_IN_2B));
       notIn2B.push(toDisplayRow(outcome));
       return;
     }
 
-    matchedKeys.add(key);
     const taxableDiff = roundTo2(prInvoice.taxableValue - twoBInvoice.taxableValue);
     const taxDiff = roundTo2(prInvoice.computedTotalTax - twoBInvoice.computedTotalTax);
     const cessDiff = roundTo2(prInvoice.cess - twoBInvoice.cess);
     const remark = Math.abs(taxableDiff) <= state.settings.taxableTolerance && Math.abs(taxDiff) <= state.settings.taxTolerance ? REMARKS.MATCHED : REMARKS.VALUE_DIFFERENCE;
 
     const prOutcome = buildInvoiceOutcome(prInvoice, remark, taxableDiff, taxDiff, cessDiff);
-    prInvoice.sourceRowIdxs.forEach((idx) => remarkByPrRowIdx.set(idx, remark));
-    twoBInvoice.sourceRowIdxs.forEach((idx) => remarkBy2BRowIdx.set(idx, remark));
 
     if (remark === REMARKS.MATCHED) matched.push(toDisplayRow(prOutcome));
     else valueDifference.push(toDisplayRow(prOutcome));
@@ -317,25 +348,38 @@ function reconcile() {
 
   Array.from(twoBGrouped.values()).forEach((twoBInvoice) => {
     const key = twoBInvoice.aggregationKey;
-    if (key.startsWith("NO_KEY||") || !matchedKeys.has(key)) {
+    if (key.startsWith("NO_KEY||") || !matched2BKeys.has(key)) {
       const outcome = buildInvoiceOutcome(twoBInvoice, REMARKS.NOT_IN_PR);
       twoBInvoice.sourceRowIdxs.forEach((idx) => remarkBy2BRowIdx.set(idx, REMARKS.NOT_IN_PR));
       notInPR.push(toDisplayRow(outcome));
     }
   });
 
-  const prExportRows = state.rawBooks.map((row, idx) => {
+  const prExportRows = rawPRRows.map((row, idx) => {
     const remark = remarkByPrRowIdx.get(idx) || REMARKS.NOT_IN_2B;
     return buildRawExportRow(row, state.mappedBooks, remark);
   });
 
-  const twoBExportRows = state.raw2b.map((row, idx) => {
+  const twoBExportRows = raw2BRows.map((row, idx) => {
     const remark = remarkBy2BRowIdx.get(idx) || REMARKS.NOT_IN_PR;
     return buildRawExportRow(row, state.mapped2b, remark);
   });
 
-  state.baselineTotals.PR = calculateTotals(prRowsForMatching);
-  state.baselineTotals["2B"] = calculateTotals(twoBRowsForMatching);
+  const prRawTotalsAfter = calculateExportTotals(prExportRows);
+  const twoBRawTotalsAfter = calculateExportTotals(twoBExportRows);
+
+  if (!totalsEqual(prRawTotalsBefore, prRawTotalsAfter) || !totalsEqual(twoBRawTotalsBefore, twoBRawTotalsAfter)) {
+    console.error("Reconciliation stopped due to raw totals mismatch", {
+      prRawTotalsBefore,
+      prRawTotalsAfter,
+      twoBRawTotalsBefore,
+      twoBRawTotalsAfter,
+    });
+    return;
+  }
+
+  state.baselineTotals.PR = prRawTotalsBefore;
+  state.baselineTotals["2B"] = twoBRawTotalsBefore;
 
   state.results = {
     Matched: matched.sort(compareBusinessExportRows),
@@ -525,6 +569,17 @@ function calculateExportTotals(rows) {
       return acc;
     },
     { taxableValue: 0, igst: 0, cgst: 0, sgst: 0, cess: 0 }
+  );
+}
+
+function totalsEqual(before, after) {
+  if (!before || !after) return false;
+  return (
+    before.taxableValue === after.taxableValue &&
+    before.igst === after.igst &&
+    before.cgst === after.cgst &&
+    before.sgst === after.sgst &&
+    before.cess === after.cess
   );
 }
 
